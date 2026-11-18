@@ -1,0 +1,293 @@
+{
+  "schema_version": 1,
+  "comment": [
+    "Maglev directed-greybox-fuzzing target catalog.",
+    "Each entry pins a compiler subsystem to (a) the C++ entry points that",
+    "implement it, (b) a d8 trace configuration that proves the input reached",
+    "it, and (c) a seed harness under seeds/ that reaches it.",
+    "'hit_patterns' are Python regular expressions matched against the",
+    "combined stdout/stderr of the traced Maglev run; any match counts as a",
+    "hit unless 'min_hits' says otherwise.",
+    "'required_patterns' must *each* match at least once, for targets whose",
+    "reachability needs more than one trace signature (e.g. an allocation node",
+    "that is then elided)."
+  ],
+  "targets": [
+    {
+      "id": "forin-hints",
+      "subsystem": "graph-builder",
+      "phase": "MaglevGraphBuilding",
+      "sources": [
+        "src/maglev/maglev-graph-builder.cc:MaglevGraphBuilder::VisitForInEnumerate",
+        "src/maglev/maglev-graph-builder.cc:MaglevGraphBuilder::VisitForInPrepare",
+        "src/maglev/maglev-graph-builder.cc:MaglevGraphBuilder::VisitForInNext",
+        "src/maglev/maglev-graph-builder.cc:MaglevGraphBuilder::VisitForInStep"
+      ],
+      "trace_flags": ["--trace-maglev-graph-building"],
+      "hit_patterns": [
+        ": ForInPrepare",
+        ": ForInNext",
+        "CallBuiltin\\(ForInEnumerate\\)"
+      ],
+      "min_hits": 2,
+      "seed": "seeds/01_forin_hints.js",
+      "trigger": [
+        "for-in over a plain object with an intact enum cache reaches the",
+        "kEnumCacheKeys lowering; a Proxy receiver forces ForInHint::kAny and",
+        "the generic ForInPrepare/ForInNext nodes."
+      ],
+      "bug_classes": [
+        "stale enum cache / CheckDynamicValue deopt loop",
+        "ForInNext lazy deopt frame with the wrong accumulator",
+        "CacheIndicesNotCleared check removed by an optimisation"
+      ],
+      "oracle": ["crash", "differential", "verifier"]
+    },
+    {
+      "id": "phi-untagging",
+      "subsystem": "phi-representation",
+      "phase": "PhiUntagging",
+      "sources": [
+        "src/maglev/maglev-phi-representation-selector.cc:MaglevPhiRepresentationSelector::Run",
+        "src/maglev/maglev-phi-representation-selector.cc:MaglevPhiRepresentationSelector::ProcessPhi"
+      ],
+      "trace_flags": ["--trace-maglev-phi-untagging"],
+      "hit_patterns": ["Untagging"],
+      "seed": "seeds/02_phi_untagging.js",
+      "trigger": [
+        "loop phi whose incoming values alternate between Smi and heap",
+        "number; the pass must either pick Float64 for the phi or insert",
+        "conversions, and the bisection path is driven by the number of",
+        "conflicting uses."
+      ],
+      "bug_classes": [
+        "wrong representation for a phi after a back edge",
+        "missing conversion at a deopt/merge point",
+        "miscompiled tagged use of an untagged phi"
+      ],
+      "oracle": ["crash", "differential", "verifier"]
+    },
+    {
+      "id": "inlining",
+      "subsystem": "inlining",
+      "phase": "MaglevGraphBuilding",
+      "sources": [
+        "src/maglev/maglev-inlining.cc:MaglevInliner::ReduceCall",
+        "src/maglev/maglev-graph-builder.cc:MaglevGraphBuilder::TryBuildInlinedCall",
+        "src/maglev/maglev-graph-builder.cc:MaglevGraphBuilder::BuildPolymorphicCall"
+      ],
+      "trace_flags": ["--trace-maglev-inlining"],
+      "hit_patterns": ["INLINE", "Inlined call"],
+      "seed": "seeds/03_inlining.js",
+      "trigger": [
+        "monomorphic small callee (direct inlining) plus a call site with",
+        "two targets (polymorphic inlining tree, --maglev-poly-calls)."
+      ],
+      "bug_classes": [
+        "wrong arguments object / context after inlining",
+        "deopt frame of an inlined callee pointing at the wrong sfi",
+        "polymorphic dispatch tree with a missing map check"
+      ],
+      "oracle": ["crash", "differential", "verifier"]
+    },
+    {
+      "id": "inlined-allocation",
+      "subsystem": "escape-analysis",
+      "phase": "AnyUseMarking",
+      "sources": [
+        "src/maglev/maglev-post-hoc-optimizations-processors.h:AnyUseMarkingProcessor::RunEscapeAnalysis",
+        "src/maglev/maglev-post-hoc-optimizations-processors.h:AnyUseMarkingProcessor::Process(InlinedAllocation*)",
+        "src/maglev/maglev-ir.h:InlinedAllocation",
+        "src/maglev/turbolev-escape-analysis.cc"
+      ],
+      "trace_flags": ["--print-maglev-graph", "--trace-maglev-escape-analysis"],
+      "hit_patterns": ["InlinedAllocation", "Removing allocation node"],
+      "required_patterns": ["InlinedAllocation", "Removing allocation node"],
+      "min_hits": 2,
+      "seed": "seeds/04_inlined_allocation.js",
+      "trigger": [
+        "object/array literals lowered to AllocationBlock + InlinedAllocation;",
+        "the escape-analysis fixpoint classifies each one, and the elider",
+        "removes the non-escaping ones (a context whose only uses sit in the",
+        "unreachable tail after a cold-call deopt). The seed also builds an",
+        "allocation that does escape (stored into a global)."
+      ],
+      "bug_classes": [
+        "allocation elided although it escaped (loads forwarded wrongly)",
+        "store to a captured allocation dropped",
+        "virtual object materialised with the wrong map/offset"
+      ],
+      "oracle": ["crash", "differential", "verifier"]
+    },
+    {
+      "id": "kna-map-invalidation",
+      "subsystem": "known-node-aspects",
+      "phase": "MaglevGraphBuilding",
+      "sources": [
+        "src/maglev/maglev-known-node-aspects.cc",
+        "src/maglev/maglev-known-node-aspects.h",
+        "src/maglev/maglev-graph-builder.cc:MaglevGraphBuilder::BuildLoadTaggedField"
+      ],
+      "trace_flags": ["--trace-maglev-kna"],
+      "hit_patterns": ["\\[KNA\\]"],
+      "seed": "seeds/05_kna_map_invalidation.js",
+      "trigger": [
+        "a load whose map is cached in KnownNodeAspects, followed by a call",
+        "that mutates the receiver (representation change, map transition,",
+        "dictionary-mode conversion, elements-kind change), followed by a",
+        "second load of the same field."
+      ],
+      "bug_classes": [
+        "stale map assumption after a store with a different representation",
+        "missing invalidation after dictionary-mode conversion",
+        "elements-kind check dropped for an indexed load"
+      ],
+      "oracle": ["crash", "differential", "verifier"]
+    },
+    {
+      "id": "loop-peeling",
+      "subsystem": "loop-peeling",
+      "phase": "MaglevLoopPeeling",
+      "sources": [
+        "src/maglev/maglev-loop-peeler.cc:MaglevLoopPeeler::Run",
+        "src/maglev/maglev-loop-peeler.cc:MaglevLoopPeeler::PeelLoop",
+        "src/maglev/maglev-graph-builder.cc:MaglevGraphBuilder::PrewalkBytecode"
+      ],
+      "trace_flags": ["--print-maglev-graph"],
+      "hit_patterns": ["peeled"],
+      "seed": "seeds/06_loop_peeling.js",
+      "trigger": [
+        "loops with a small statically known trip count, branches in the",
+        "body, early exits and nested loops; the peeler duplicates the body",
+        "and remaps phis/values, with the optimistic-peeling fallback when",
+        "the loop end state is incompatible."
+      ],
+      "bug_classes": [
+        "value/phi mapping wrong after cloning",
+        "side effect dropped or duplicated in the peeled iteration",
+        "peeled loop deopts into a corrupted frame"
+      ],
+      "oracle": ["crash", "differential", "verifier"]
+    },
+    {
+      "id": "truncation",
+      "subsystem": "truncation",
+      "phase": "MaglevTruncation",
+      "sources": [
+        "src/maglev/maglev-truncation.cc:MaglevTruncationProcessor::PreProcessGraph",
+        "src/maglev/maglev-truncation.h:MaglevTruncation"
+      ],
+      "trace_flags": ["--trace-maglev-truncation"],
+      "hit_patterns": ["\\[maglev-truncation\\]"],
+      "seed": "seeds/07_truncation.js",
+      "trigger": [
+        "nodes used only in 32-bit contexts (|0, bitwise ops, shifts) so",
+        "that the pass rewrites Int32AddWithOverflow to Int32Add and elides",
+        "identity Int32BitwiseOr nodes."
+      ],
+      "bug_classes": [
+        "int32 truncation of a value that is later used as tagged",
+        "overflow check dropped for a value that can overflow",
+        "range information not updated after truncation"
+      ],
+      "oracle": ["crash", "differential", "verifier"]
+    },
+    {
+      "id": "regalloc-gap-moves",
+      "subsystem": "regalloc-codegen",
+      "phase": "RegAlloc",
+      "sources": [
+        "src/maglev/maglev-regalloc.cc:StraightForwardRegisterAllocator::AllocateRegisters",
+        "src/maglev/maglev-regalloc.cc:StraightForwardRegisterAllocator::AllocateBlock",
+        "src/maglev/maglev-regalloc.cc:StraightForwardRegisterAllocator::TryAllocateFreeReg"
+      ],
+      "trace_flags": ["--print-maglev-graph"],
+      "hit_patterns": ["GapMove"],
+      "seed": "seeds/08_regalloc.js",
+      "trigger": [
+        "many simultaneously live values in different register classes,",
+        "values live across calls (caller-saved), and live values at merge",
+        "points, so that the allocator emits gap moves and spills."
+      ],
+      "bug_classes": [
+        "swapped gap-move sources (parallel move bug)",
+        "spill slot reused while a value is still live",
+        "wrong register class for an untagged value"
+      ],
+      "oracle": ["crash", "differential", "verifier", "deopt-loop"]
+    },
+    {
+      "id": "osr-entry",
+      "subsystem": "osr",
+      "phase": "MaglevGraphBuilding",
+      "sources": [
+        "src/maglev/maglev-compiler.cc:MaglevCompiler::Compile (osr_offset)",
+        "src/maglev/maglev-interpreter-frame-state.cc",
+        "src/maglev/maglev-graph-builder.cc:MaglevGraphBuilder::BuildOSREntry"
+      ],
+      "trace_flags": ["--trace-maglev-graph-building"],
+      "hit_patterns": ["by OSR from"],
+      "seed": "seeds/09_osr.js",
+      "trigger": [
+        "%OptimizeOsr() from inside a hot loop with Smi, double and tagged",
+        "loop-carried values, plus a nested loop: the OSR entry has to",
+        "reconstruct the full interpreter frame at the loop header."
+      ],
+      "bug_classes": [
+        "OSR frame state with the wrong register/accumulator",
+        "loop phis not initialised from the interpreter frame",
+        "OSR entry into a peeled loop with inconsistent state"
+      ],
+      "oracle": ["crash", "differential", "verifier"]
+    },
+    {
+      "id": "kna-replay-elision",
+      "subsystem": "known-node-aspects",
+      "phase": "Inlining",
+      "sources": [
+        "src/maglev/maglev-inlining.cc:MaglevInliner::BuildInlineFunction",
+        "src/maglev/maglev-inlining.cc:MaglevInliner::RunOptimizer",
+        "src/maglev/maglev-reducer-inl.h:MaglevReducer::BuildCheckSmi",
+        "src/maglev/maglev-reducer-inl.h:MaglevReducer::BuildSmiUntag"
+      ],
+      "trace_flags": [
+        "--maglev-non-eager-inlining",
+        "--trace-maglev-inlining",
+        "--print-maglev-graph"
+      ],
+      "required_patterns": ["INLINE", "UnsafeSmiUntag"],
+      "seed": "seeds/10_kna_replay_elision.js",
+      "trigger": [
+        "three %DisableEagerInlining-marked callees called from one driver;",
+        "the first mutates the field whose Smi-representation load the others",
+        "re-read, so each callee's entry KnownNodeAspects is a snapshot taken",
+        "before the mutation body was spliced in. The graph builder elides the",
+        "Smi checks (UnsafeSmiUntag) while the store's own parameter check is",
+        "still emitted, so both behaviours appear in one graph."
+      ],
+      "bug_classes": [
+        "stale NodeInfo::type_ eliding CheckSmi and producing an UnsafeSmiUntag",
+        "stale static type after promote_post_loop_type",
+        "loaded_constant_properties_ reuse across an inlined store"
+      ],
+      "oracle": ["differential", "crash", "verifier"]
+    },
+    {
+      "id": "generic-differential",
+      "subsystem": "any",
+      "phase": "any",
+      "sources": [],
+      "trace_flags": [],
+      "hit_patterns": [],
+      "min_hits": 0,
+      "seed": "seeds/",
+      "trigger": [
+        "fallback target: any seed, no reachability requirement. Useful for",
+        "mutation campaigns where the marker of interest is produced by a",
+        "flag combination rather than by a fixed trace flag."
+      ],
+      "bug_classes": ["any"],
+      "oracle": ["crash", "differential", "deopt-loop"]
+    }
+  ]
+}

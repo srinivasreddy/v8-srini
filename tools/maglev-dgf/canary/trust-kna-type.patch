@@ -1,0 +1,20 @@
+diff --git a/src/maglev/maglev-reducer-inl.h b/src/maglev/maglev-reducer-inl.h
+index 731237febc6..bfbc6aca115 100644
+--- a/src/maglev/maglev-reducer-inl.h
++++ b/src/maglev/maglev-reducer-inl.h
+@@ -3153,6 +3153,15 @@ MaybeReduceResult MaglevReducer<BaseT>::TryReduceObjectIs(
+ template <typename BaseT>
+ ReduceResult MaglevReducer<BaseT>::BuildCheckSmi(ValueNode* object) {
+   if (object->StaticTypeIs(broker(), NodeType::kSmi)) return object;
++  // DGF canary: elide the check whenever the KNA knows *any* type for the
++  // node, instead of only when it knows kSmi. This injects "the
++  // representation proof is trusted unconditionally", so that a stale or
++  // wrong proof becomes observably unsafe. Not part of the shipping
++  // compiler: `dgf.py canary` applies and reverts this hunk.
++  if (known_node_aspects().GetTypeUnchecked(broker(), object) !=
++      NodeType::kUnknown) {
++    return object;
++  }
+   RETURN_IF_DONE(EnsureType(object, NodeType::kSmi, DeoptimizeReason::kSmi));
+ 
+   // Untagged constants in Smi range don't need runtime checks.
