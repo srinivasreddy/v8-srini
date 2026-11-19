@@ -68,6 +68,60 @@
       "oracle": ["crash", "differential", "verifier"]
     },
     {
+      "id": "phi-heapobjectness",
+      "subsystem": "representation-selector",
+      "phase": "PhiUntagging",
+      "sources": [
+        "src/maglev/maglev-phi-representation-selector.cc:ConvertTaggedPhiTo",
+        "src/maglev/maglev-phi-representation-selector.cc:UpdateNodePhiInput(CheckHeapObject*)",
+        "src/maglev/maglev-phi-representation-selector.cc:EnsurePhiTagged"
+      ],
+      "config_flags": ["--maglev-non-eager-inlining"],
+      "trace_flags": [
+        "--print-maglev-graph",
+        "--trace-maglev-phi-untagging"
+      ],
+      "required_patterns": ["Phi", "UnsafeSmiUntag"],
+      "seed": "seeds/11_phi_heapobjectness.js",
+      "directed": {
+        "template": "templates/phi_heapobjectness.tmpl.js",
+        "slots": {
+          "WARMUP_VALUE": [
+            "1.5",
+            "2.5",
+            "100.5"
+          ],
+          "TRIGGER_VALUE": [
+            "1.5",
+            "2.5",
+            "1.0",
+            "0.5"
+          ],
+          "CONSUMER": [
+            "length+[0]",
+            "[0]",
+            "length"
+          ]
+        },
+        "fixed": {
+          "N": "8"
+        }
+      },
+      "trigger": [
+        "loop Phi merges a Smi-representation field load and a HeapNumber",
+        "field across the back edge; the Phi is untagged to Float64 and its",
+        "tagged consumer expects a HeapObject (length/element access), so the",
+        "CheckHeapObject that used to guard that use has to survive the",
+        "untagging."
+      ],
+      "bug_classes": [
+        "HeapObjectness dropped from the Phi type",
+        "CheckHeapObject elided after untagging",
+        "retagged HeapNumber reaching a property access"
+      ],
+      "oracle": ["crash", "differential", "verifier"]
+    },
+    {
       "id": "inlining",
       "subsystem": "inlining",
       "phase": "MaglevGraphBuilding",
