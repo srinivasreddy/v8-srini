@@ -17,6 +17,14 @@
       "summary": "BuildSmiUntag untags unsafely when the type was just updated, not only when it already matched.",
       "expects": "inputs that reach BuildSmiUntag with a fresh kSmi fact diverge",
       "validated": false
+    },
+    {
+      "id": "phi-heapobjectness",
+      "patch": "canary/phi-heapobjectness.patch",
+      "channel": "Phi untagging (ConvertTaggedPhiTo)",
+      "summary": "Untagged numeric Phi loses HeapObjectness; its CheckHeapObject is replaced by Identity.",
+      "expects": "any input that reaches a Phi with mixed Smi/HeapNumber input and a HeapObject consumer diverges in the maglev config",
+      "validated": false
     }
   ]
 }

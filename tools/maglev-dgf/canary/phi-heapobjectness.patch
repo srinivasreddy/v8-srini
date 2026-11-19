@@ -1,0 +1,58 @@
+diff --git a/src/maglev/maglev-phi-representation-selector.cc b/src/maglev/maglev-phi-representation-selector.cc
+index 5b44744d9e9..9c4e69b8582 100644
+--- a/src/maglev/maglev-phi-representation-selector.cc
++++ b/src/maglev/maglev-phi-representation-selector.cc
+@@ -990,6 +990,14 @@ void MaglevPhiRepresentationSelector::ConvertTaggedPhiTo(
+          repr == ValueRepresentation::kFloat64 ||
+          repr == ValueRepresentation::kHoleyFloat64);
+   phi->change_representation(repr);
++  // DGF canary: the untagged numeric Phi keeps its Smi-ness but no longer
++  // records that it can hold a HeapObject. GetRetaggingKindForPhi then reads
++  // the Phi as Smi-only, so EnsurePhiTagged emits an *unsafe* Smi tag for a
++  // value that can still be a HeapNumber at runtime. Not part of the shipping
++  // selector: `dgf.py canary` applies and reverts this hunk.
++  if (!IsEmptyNodeType(phi->type())) {
++    phi->set_type(RemoveType(phi->type(), NodeType::kAnyHeapObject));
++  }
+ 
+   for (int input_index = 0; input_index < phi->input_count(); input_index++) {
+     ValueNode* input = phi->input(input_index).node();
+@@ -1323,6 +1331,24 @@ ProcessResult MaglevPhiRepresentationSelector::UpdateNodePhiInput(
+   UNREACHABLE();
+ }
+ 
++// DGF canary: a CheckHeapObject only exists because the graph builder had a
++// HeapObject fact for its input. Once the Phi's type no longer carries
++// HeapObjectness (cf ConvertTaggedPhiTo), the check is taken on faith: the
++// input is still retagged (so the users of the Phi agree on a representation)
++// but the retagging is no longer verified to produce a HeapObject, and the
++// check itself is dropped -- CheckHeapObject(x) behaves like the identity on
++// x. Not part of the shipping selector: `dgf.py canary` applies and reverts
++// this hunk.
++ProcessResult MaglevPhiRepresentationSelector::UpdateNodePhiInput(
++    CheckHeapObject* node, Phi* phi, int input_index,
++    const ProcessingState* state) {
++  DCHECK_EQ(input_index, 0);
++  node->change_input(input_index,
++                     EnsurePhiTagged(phi, reducer_.current_block(),
++                                     BasicBlockPosition::Start(), state));
++  return ProcessResult::kRemove;
++}
++
+ ProcessResult MaglevPhiRepresentationSelector::UpdateNodePhiInput(
+     CheckNumber* node, Phi* phi, int input_index,
+     const ProcessingState* state) {
+diff --git a/src/maglev/maglev-phi-representation-selector.h b/src/maglev/maglev-phi-representation-selector.h
+index 3007727a099..3dce92e4886 100644
+--- a/src/maglev/maglev-phi-representation-selector.h
++++ b/src/maglev/maglev-phi-representation-selector.h
+@@ -247,6 +247,9 @@ class MaglevPhiRepresentationSelector {
+                                    const ProcessingState* state);
+   ProcessResult UpdateNodePhiInput(CheckSmi* node, Phi* phi, int input_index,
+                                    const ProcessingState* state);
++  ProcessResult UpdateNodePhiInput(CheckHeapObject* node, Phi* phi,
++                                   int input_index,
++                                   const ProcessingState* state);
+   ProcessResult UpdateNodePhiInput(CheckNumber* node, Phi* phi, int input_index,
+                                    const ProcessingState* state);
+   ProcessResult UpdateNodePhiInput(CheckedNumberOrOddballToUint8Clamped* node,
