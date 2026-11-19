@@ -11,12 +11,12 @@
       "validated": true
     },
     {
-      "id": "unchecked-untag",
+      "id": "inlined-smi-proof",
       "patch": "canary/unchecked-untag.patch",
-      "channel": "proof elision (BuildSmiUntag)",
-      "summary": "BuildSmiUntag untags unsafely when the type was just updated, not only when it already matched.",
-      "expects": "inputs that reach BuildSmiUntag with a fresh kSmi fact diverge",
-      "validated": false
+      "channel": "inlined proof (post-inline optimizer)",
+      "summary": "Inside MaglevInliner::RunOptimizer every Smi untag is unchecked: the callee's call-feedback proof is applied to the caller's node without re-validation.",
+      "expects": "a caller warmed to Smi whose callee (SignedSmall feedback) is inlined, then called with a HeapNumber, aborts in UnsafeSmiUntag (Operand is not a smi) while the baseline returns normally; the gate is the inliner's optimizer run itself, so a graph that does not inline keeps the stock behavior and every Smi untag in a graph that does inline is affected",
+      "validated": true
     },
     {
       "id": "phi-heapobjectness",

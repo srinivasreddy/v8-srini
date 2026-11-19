@@ -1,11 +1,80 @@
+diff --git a/src/maglev/maglev-graph-optimizer.cc b/src/maglev/maglev-graph-optimizer.cc
+index 72beecc5f32..2cfcb8b09c9 100644
+--- a/src/maglev/maglev-graph-optimizer.cc
++++ b/src/maglev/maglev-graph-optimizer.cc
+@@ -2824,7 +2824,12 @@ ProcessResult MaglevGraphOptimizer::VisitCheckedSmiUntag(
+   //   return ProcessResult::kTruncateBlock;
+   // }
+   // DCHECK(maybe_input.IsFail());
+-  if (reducer_.CheckType(node->input_node(0), NodeType::kSmi)) {
++  // DGF canary: while the post-inline optimizer runs, a CheckedSmiUntag is
++  // replaced by an unchecked one without asking whether its input is known to
++  // be a Smi. The check was introduced for the inlined callee's call feedback,
++  // and the caller's argument is never re-validated against it.
++  if (DgfInInlinerOptimizer() ||
++      reducer_.CheckType(node->input_node(0), NodeType::kSmi)) {
+     return OverwriteWith(Opcode::kUnsafeSmiUntag);
+   }
+   return ProcessResult::kContinue;
+diff --git a/src/maglev/maglev-inlining.cc b/src/maglev/maglev-inlining.cc
+index 4a9a150cc78..e607f2e4514 100644
+--- a/src/maglev/maglev-inlining.cc
++++ b/src/maglev/maglev-inlining.cc
+@@ -138,6 +138,9 @@ bool MaglevInliner::InlineCallSites() {
+ }
+ 
+ void MaglevInliner::RunOptimizer() {
++  // DGF canary: mark the post-inline optimizer; everything it reduces is a
++  // node that came out of the inlined bodies or that now consumes them.
++  DgfInInlinerOptimizer() = true;
+   ReachableExceptionHandlerTracker exception_handler_tracker(graph_);
+   RecomputeKnownNodeAspectsProcessor kna_processor(graph_,
+                                                    exception_handler_tracker);
+@@ -155,6 +158,7 @@ void MaglevInliner::RunOptimizer() {
+   if (V8_UNLIKELY(ShouldPrintMaglevGraph())) {
+     PrintMaglevGraph("After optimization");
+   }
++  DgfInInlinerOptimizer() = false;
+ }
+ 
+ bool MaglevInliner::Run() {
+diff --git a/src/maglev/maglev-reducer-inl.h b/src/maglev/maglev-reducer-inl.h
+index 731237febc6..a1adf14f291 100644
 --- a/src/maglev/maglev-reducer-inl.h
 +++ b/src/maglev/maglev-reducer-inl.h
-@@ -3212,7 +3212,7 @@
+@@ -3212,6 +3212,12 @@ ReduceResult MaglevReducer<BaseT>::BuildSmiUntag(ValueNode* node) {
        known_node_aspects().EnsureType(broker(), node, NodeType::kSmi);
    if (ensure_res == EnsureTypeResult::kContradiction) {
      return EmitUnconditionalDeopt(DeoptimizeReason::kNotASmi);
--  } else if (ensure_res == EnsureTypeResult::kAlreadyHadType) {
-+  } else if (ensure_res != EnsureTypeResult::kContradiction) {
++  } else if (DgfInInlinerOptimizer()) {
++    // DGF canary: inside the post-inline optimizer a Smi conversion created
++    // for an inlined body is emitted unchecked, i.e. the Smi proof the inliner
++    // inherited from the callee's call feedback is installed without being
++    // re-validated against the caller's node.
++    return AddNewNodeNoInputConversion<UnsafeSmiUntag>({node});
+   } else if (ensure_res == EnsureTypeResult::kAlreadyHadType) {
      return AddNewNodeNoInputConversion<UnsafeSmiUntag>({node});
    } else {
-     return AddNewNodeNoInputConversion<CheckedSmiUntag>({node});
+diff --git a/src/maglev/maglev-reducer.h b/src/maglev/maglev-reducer.h
+index c2e99b35fda..c7d8c19999b 100644
+--- a/src/maglev/maglev-reducer.h
++++ b/src/maglev/maglev-reducer.h
+@@ -45,6 +45,18 @@ template <typename DerivedT, typename BaseT>
+ class SubgraphBase;
+ class ReduceResult;
+ 
++// DGF canary: set while `MaglevInliner::RunOptimizer()` -- the optimizer pass
++// that runs over the graph once the inliner has spliced the callee bodies in --
++// is running. Reductions performed in that pass are the ones that apply a
++// proof derived from the callee's call feedback to the caller's nodes, so the
++// canary gates its fault on this flag and leaves the stock behavior intact
++// everywhere else. Not part of the shipping compiler: `dgf.py canary` applies
++// and reverts this hunk.
++inline bool& DgfInInlinerOptimizer() {
++  static bool running = false;
++  return running;
++}
++
+ enum class CpuOperation {
+   kFloat64Round,
+   kMathClz32,
