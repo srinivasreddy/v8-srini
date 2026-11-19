@@ -531,6 +531,20 @@ def _split_first_arg(args: str) -> tuple[str, str]:
     return args, ""
 
 
+def _count_args(args: str) -> int:
+    """Number of top-level arguments in `args` (empty means none)."""
+    if not args.strip():
+        return 0
+    count = 1
+    rest = args
+    while True:
+        _, rest = _split_first_arg(rest)
+        if not rest:
+            return count
+        rest = rest[1:]
+        count += 1
+
+
 def _pick_call_site(src: str, rng: random.Random, names: list,
                     require_args: bool) -> tuple[str | None, CallSite | None]:
     """Picks a callee that is actually *called* in the source.
@@ -550,10 +564,18 @@ def _pick_call_site(src: str, rng: random.Random, names: list,
 
 
 def op_extra_arg(src: str, rng: random.Random, ctx: dict) -> str | None:
-    """f(a) -> f(a, 0): changes arity feedback and the inlined frame."""
+    """f(a) -> f(a, 0): changes arity feedback and the inlined frame.
+
+    Only where the extra argument is ignored: `function f(x, y)` called as
+    `f(1)` computes `1 + undefined`, so appending a `0` would move the
+    result and the seed's self-check would reject the mutant.
+    """
     name, site = _pick_call_site(src, rng, ctx["functions"],
                                  require_args=False)
     if site is None:
+        return None
+    arity = (ctx.get("arities") or {}).get(name)
+    if arity is not None and arity > _count_args(site.args):
         return None
     call = (f"{name}({site.args}, 0)" if site.args.strip()
             else f"{name}(0)")
@@ -696,12 +718,16 @@ OPS = [
 
 
 def mutate_context(src: str) -> dict:
-    """Collects the callee names the mutators may rewrite."""
+    """Collects the callee names and arities the mutators may rewrite."""
     functions = re.findall(r"^\s*function\s+(\w+)", src, re.M)
     arrows = re.findall(
         r"^\s*(?:const|let|var)\s+(\w+)\s*=\s*"
         r"(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>", src, re.M)
-    return {"functions": functions, "arrows": arrows}
+    arities = {}
+    for m in re.finditer(r"^\s*function\s+(\w+)\s*\(([^)]*)\)",
+                         src, re.M):
+        arities[m.group(1)] = _count_args(m.group(2))
+    return {"functions": functions, "arrows": arrows, "arities": arities}
 
 
 def mutate_source(src: str, rng: random.Random,
@@ -1002,14 +1028,28 @@ def classify(reached: bool, clean_fires: bool, canary_fires: bool) -> str:
     return "clean"
 
 
+MAGLEV_CRASH_RE = re.compile(r"maglev", re.I)
+
+
+def _crashed_in_maglev(target: dict, result: D8Result) -> bool:
+    """True when a crashed run names Maglev itself, not an unrelated fatal.
+
+    A crash is evidence of reachability only if the report points into Maglev:
+    `../../src/maglev/...` in the stack, `MaglevGraphBuilder::...`, and so
+    on. Without that, a candidate that dies in some other subsystem would be
+    counted as having reached the target.
+    """
+    return result.crashed and bool(MAGLEV_CRASH_RE.search(result.output))
+
+
 def verify_candidate(target: dict, d8: Path, canary: Path | None,
                      testcase: Path, timeout: float,
                      extra_flags: Sequence[str] = ()) -> Verdict:
     trace = run_d8(d8, testcase, maglev_flags(target, extra_flags), timeout)
     hits = count_hits(target, trace.output)
     missing = missing_patterns(target, hits)
-    # A crash in the trace run already proves the input reached Maglev.
-    reached = not missing or trace.crashed
+    # A Maglev crash in the trace run already proves the input reached it.
+    reached = not missing or _crashed_in_maglev(target, trace)
     _, _, divergence = differential_check(d8, target, testcase, timeout,
                                           extra_flags)
     assert_fires = fires(
