@@ -832,6 +832,30 @@ def coverage_signature(output: str) -> Signature:
                      inlines)
 
 
+def distance(sig: Signature, target: dict) -> int:
+    """How far a graph is from the target's elision site; lower is closer.
+
+    A new path signature only says *that* a candidate is different, so the
+    directed search has no reason to prefer the candidate that is one node
+    away from the elision over the one that is ten nodes away. The catalog
+    states the graph shape of the elision from both sides: opcodes that must
+    be gone, because a surviving check is the thing the fault removes, and
+    opcodes that must be there, because they are what the elision leaves
+    behind. A missing "want_present" node weighs little: the site can be
+    reached through a different route, and the signature only keeps opcode
+    names, not edges.
+    """
+    spec = target.get("directed", {}).get("distance", {})
+    score = 0
+    for name in spec.get("want_absent", []):
+        if name in sig.opcodes:
+            score += spec.get("weight_absent", 10)
+    for name in spec.get("want_present", []):
+        if name not in sig.opcodes:
+            score += spec.get("weight_present", 1)
+    return score
+
+
 def slot_combinations(spec: dict, rng: random.Random,
                       iterations: int) -> list[dict]:
     """Draws `iterations` distinct slot combinations; all of them if fewer."""
@@ -878,6 +902,7 @@ def cmd_direct(args, targets: list[dict]) -> int:
     seed_trace = run_d8(d8, seed_path(target),
                         maglev_flags(target, args.extra_flag), args.timeout)
     seed_signature = coverage_signature(seed_trace.output)
+    seed_distance = distance(seed_signature, target)
     # The seed's own graph is the first path the corpus has seen; without it,
     # the first candidates that reproduce the seed are reported as new.
     corpus.setdefault(seed_signature.digest, {
@@ -886,6 +911,7 @@ def cmd_direct(args, targets: list[dict]) -> int:
         "inlines": seed_signature.inlines,
         "nodes": len(seed_signature.opcodes),
         "hits": count_hits(target, seed_trace.output),
+        "distance": seed_distance,
     })
 
     stats = collections.Counter()
@@ -904,6 +930,8 @@ def cmd_direct(args, targets: list[dict]) -> int:
                 hits = count_hits(target, trace.output)
                 missing = missing_patterns(target, hits)
                 signature = coverage_signature(trace.output)
+                dist = distance(signature, target)
+                stats[f"dist_{dist}"] += 1
                 new_path = signature.digest not in corpus
                 _, baseline, divergence = differential_check(
                     d8, target, testcase, args.timeout, args.extra_flag)
@@ -922,16 +950,22 @@ def cmd_direct(args, targets: list[dict]) -> int:
                         "inlines": signature.inlines,
                         "nodes": len(signature.opcodes),
                         "hits": hits,
+                        "distance": dist,
                     }
                 if divergence:
                     stats["divergences"] += 1
                 if not (new_path or divergence or args.keep_all):
+                    if args.verbose:
+                        print(f"[---] distance={dist}  {label}")
                     continue
-                path = outdir / f"{target['id']}-{index:04d}.js"
+                # The distance is part of the name, so a sorted directory
+                # listing is the search's best-first order.
+                path = outdir / f"{target['id']}-d{dist:03d}-{index:04d}.js"
                 path.write_text(source)
                 status = ("DIFF" if divergence else
                           "NEW " if new_path else "...")
-                print(f"[{status}] {path.name}  {label}")
+                print(f"[{status}] {path.name}  {label}"
+                      + (f"  distance={dist}" if args.verbose else ""))
                 if args.verbose:
                     print(f"        inlines={signature.inlines} "
                           f"nodes={len(signature.opcodes)} "
@@ -946,6 +980,7 @@ def cmd_direct(args, targets: list[dict]) -> int:
                     "target": target["id"],
                     "slots": values,
                     "signature": signature.digest,
+                    "distance": dist,
                     "new_path": new_path,
                     "missing": missing,
                     "divergence": divergence,
@@ -961,6 +996,12 @@ def cmd_direct(args, targets: list[dict]) -> int:
           f"new_paths={stats['new_paths']} "
           f"divergences={stats['divergences']} "
           f"corpus={len(corpus)} ({corpus_file})")
+    histogram = sorted((int(key[len("dist_"):]), count)
+                       for key, count in stats.items()
+                       if key.startswith("dist_"))
+    if histogram:
+        print(f"distance (seed={seed_distance}): "
+              + " ".join(f"{dist}={count}" for dist, count in histogram))
     return 1 if stats["divergences"] else 0
 
 

@@ -162,6 +162,15 @@ re-run with a wider `--iterations` starts where the previous one stopped.
 switches `CheckSmi` for `UnsafeSmiUntag` (or `Int32Add` for `Float64Add`) is
 visible at a glance.
 
+A new signature only says that a candidate is *different*, so the search also
+scores how close each graph is to the elision itself: the catalog's
+`directed.distance` lists the opcodes that must be gone (`want_absent` — a
+surviving check is exactly what the fault deletes) and the opcodes the elided
+graph still has (`want_present`). The score prefixes the saved file name
+(`phi-heapobjectness-d002-0003.js`), so a sorted listing of
+`mutants/<target>/` is the search's best-first order, and the summary prints
+the distance histogram next to the seed's own distance.
+
 ## Deterministic verification (`verify`, `canary`)
 
 `verify` runs the two detectors that decide whether a candidate is real:
