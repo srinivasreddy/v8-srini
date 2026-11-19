@@ -845,9 +845,18 @@ def cmd_direct(args, targets: list[dict]) -> int:
     corpus_file.parent.mkdir(parents=True, exist_ok=True)
     corpus = (json.loads(corpus_file.read_text()) if corpus_file.exists()
               else {})
-    seed_signature = coverage_signature(
-        run_d8(d8, seed_path(target), maglev_flags(target, args.extra_flag),
-               args.timeout).output)
+    seed_trace = run_d8(d8, seed_path(target),
+                        maglev_flags(target, args.extra_flag), args.timeout)
+    seed_signature = coverage_signature(seed_trace.output)
+    # The seed's own graph is the first path the corpus has seen; without it,
+    # the first candidates that reproduce the seed are reported as new.
+    corpus.setdefault(seed_signature.digest, {
+        "seed": True,
+        "slots": {},
+        "inlines": seed_signature.inlines,
+        "nodes": len(seed_signature.opcodes),
+        "hits": count_hits(target, seed_trace.output),
+    })
 
     stats = collections.Counter()
     log = open(args.log, "a") if args.log else None

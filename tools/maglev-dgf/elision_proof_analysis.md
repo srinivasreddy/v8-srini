@@ -630,17 +630,20 @@ Coverage feedback is the graph dump. `coverage_signature()` reduces a
 `--print-maglev-graph` run to the sorted multiset of node opcodes plus the
 count of non-eager inlining events; an unseen signature is a new optimization
 path and is stored in `corpus/<target>.json` with the slots that produced it.
+The seed's own graph is inserted first, so a candidate that reproduces the
+seed is not a new path.
 
 Measured (`out/x64.asan-fuzz`, 216 points, `--random-seed 1`):
 
 ```
-candidates=216 hit=216 miss=0 new_paths=39 divergences=0 corpus=39
+candidates=216 hit=216 miss=0 new_paths=38 divergences=0 corpus=39
 ```
 
 Every point still reached `INLINE` + `UnsafeSmiUntag`: changing these values
-does not cost the target. The 216 points map onto 39 distinct signatures,
-which is the useful part of the result. What a point changes is the arithmetic
-around the elision, and the signature says so before any output does. One
+does not cost the target. The 216 points map onto 38 distinct signatures
+beyond the seed's own graph, which is the useful part of the result. What a
+point changes is the arithmetic around the elision, and the signature says so
+before any output does. One
 sample point (`SMI_CONST` = `1073741824`, `BACKEDGE` =
 `(n + bump(o.x) + load(o)) * 1.5`, `ARG_VALUE` = `2.5`) diffs against the
 seed as `+Int32Add -Int32AddWithOverflow -Int32IncrementWithOverflow`: without
