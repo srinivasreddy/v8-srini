@@ -486,7 +486,11 @@ def _call_sites(src: str, name: str) -> list[CallSite]:
     pattern = re.compile(r"(?<![\w.$])" + re.escape(name) + r"\s*\(")
     for m in pattern.finditer(src):
         line_start = src.rfind("\n", 0, m.start()) + 1
-        if src[line_start:m.start()].lstrip().startswith("//"):
+        prefix = src[line_start:m.start()]
+        comment_pos = prefix.find("//")
+        if (comment_pos >= 0 and "'" not in prefix[:comment_pos] and
+                '"' not in prefix[:comment_pos] and
+                "`" not in prefix[:comment_pos]):
             continue
         if src[:m.start()].rstrip().endswith("function"):
             continue
