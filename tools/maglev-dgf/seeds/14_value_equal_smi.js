@@ -52,8 +52,11 @@ gc();
 
 // -0.0 is a HeapNumber whose value equals the Smi 0. Storing it with the
 // Smi tag and no write barrier is the bug, and the sign is what makes it
-// visible: -0 must stay -0.
-check(1 / store(o, -0.0) === -Infinity, 'maglev, heap number -0.0');
+// visible: -0 must stay -0. The field is read here rather than through
+// `store`'s return value, because Maglev forwards the node it just stored to
+// the load that follows it in the same function.
+store(o, -0.0);
+check(1 / o.x === -Infinity, 'maglev, heap number -0.0');
 gc();
 
 check(store(o, 0) === 0, 'maglev, smi 0');

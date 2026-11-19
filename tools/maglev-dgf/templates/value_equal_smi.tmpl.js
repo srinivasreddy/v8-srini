@@ -55,15 +55,21 @@ store(o, {{WARMUP_VAL}});
 %OptimizeMaglevOnNextCall(store);
 store(o, {{WARMUP_VAL}});
 
-storeConst(o);
-storeConst(o);
-
-%OptimizeMaglevOnNextCall(storeConst);
-
 if ('{{GC_POSITION}}' === 'before-and-after') gc();
-let stored = storeConst(o);
+// `store` runs while the field is still the receiver's warmup representation,
+// and the field is read straight after it: Maglev forwards the node it stored
+// to a load in the same function, so the store's return value cannot show a
+// value that only differs in its representation. `storeConst` runs afterwards,
+// because writing a HeapNumber constant such as -0.0 into the field
+// generalizes it to Double and would make `store` deopt on the receiver's map
+// before the interesting store happens.
 let checked = store(o, {{TRIGGER_VAL}});
+let field = 1 / o.x;
+let stored = storeConst(o);
+storeConst(o);
+%OptimizeMaglevOnNextCall(storeConst);
+stored = storeConst(o);
 gc();
 
 print('result ' + stored + ' ' + (1 / stored) + ' ' + checked + ' ' +
-      (1 / checked));
+      (1 / checked) + ' field ' + field);

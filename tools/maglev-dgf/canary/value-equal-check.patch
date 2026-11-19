@@ -1,0 +1,62 @@
+diff --git a/src/maglev/maglev-reducer-inl.h b/src/maglev/maglev-reducer-inl.h
+index 731237febc6..75091a3cbf8 100644
+--- a/src/maglev/maglev-reducer-inl.h
++++ b/src/maglev/maglev-reducer-inl.h
+@@ -650,6 +650,30 @@ ReduceResult MaglevReducer<BaseT>::BuildStoreTaggedFieldNoWriteBarrier(
+   // test/mjsunit/maglev/regress-538884561-2.js.
+   ABORT_IF_EMPTY_TYPE(value);
+ 
++  // DGF canary (value-equal-check, part 2): a Smi field is written through
++  // this path (maglev-graph-builder.cc:TryBuildStoreField), and the proof the
++  // store needs is the value's *Smi representation*. Take it from the value
++  // instead: rebuild the stored node from
++  // TruncateCheckedNumberOrOddballToInt32 + CheckedSmiTagInt32. The
++  // representation check (CheckSmi, which CanElideWriteBarrier would otherwise
++  // emit through CheckType) is elided, the write barrier is elided as for any
++  // Smi, and what is written is the Smi of the value rather than the original
++  // node. That is what a HeapNumber which is value-equal to an integer Smi
++  // satisfies -- CheckFloat64SameValue(value, IntegerSmi) holds for 5.0, -0.0
++  // and 0.0 -- so -0.0 is written as the Smi 0 and loses its sign (the
++  // truncation is the one that maps -0.0 to 0, unlike the checked
++  // float64->int32 conversions, which deopt on it). Values that are not
++  // Numbers still deopt, and a truncated value that is not a Smi deopts in
++  // CheckedSmiTagInt32. Untagged values (e.g. an integral Float64Constant)
++  // keep the stock path. Not part of the shipping compiler: `dgf.py canary`
++  // applies and reverts this hunk.
++  if (value->is_tagged() && NodeTypeCanBe(GetType(value), NodeType::kNumber)) {
++    ValueNode* as_int32 =
++        AddNewNodeNoInputConversion<TruncateCheckedNumberOrOddballToInt32>(
++            {value}, NodeType::kNumber);
++    value = AddNewNodeNoInputConversion<CheckedSmiTagInt32>({as_int32});
++  }
++
+   DCHECK(CanElideWriteBarrier(object, value));
+   return AddNewNode<StoreTaggedFieldNoWriteBarrier>({object, value}, offset,
+                                                     store_mode, property_key);
+@@ -3155,6 +3179,26 @@ ReduceResult MaglevReducer<BaseT>::BuildCheckSmi(ValueNode* object) {
+   if (object->StaticTypeIs(broker(), NodeType::kSmi)) return object;
+   RETURN_IF_DONE(EnsureType(object, NodeType::kSmi, DeoptimizeReason::kSmi));
+ 
++  // DGF canary (value-equal-check): the proof is taken on the node's *value*
++  // instead of on its representation. A tagged node whose static type may be a
++  // Number is accepted as its integer value: what is emitted is the value
++  // check (TruncateCheckedNumberOrOddballToInt32 + CheckedSmiTagInt32), never
++  // the representation check (CheckSmi), and the Smi handed back to the caller
++  // is rebuilt from that value. That is exactly what a HeapNumber which is
++  // value-equal to an integer Smi satisfies -- CheckFloat64SameValue(value,
++  // IntegerSmi) holds for 5.0, -0.0 and 0.0 -- so -0.0 loses its sign and no
++  // HeapNumber ever reaches the field. Non-Numbers still deopt, and a
++  // truncated value that is not a Smi deopts in CheckedSmiTagInt32;
++  // representations that are not tagged keep the stock check below. Not part
++  // of the shipping compiler: `dgf.py canary` applies and reverts this hunk.
++  if (object->value_representation() == ValueRepresentation::kTagged &&
++      NodeTypeCanBe(object->GetStaticType(broker()), NodeType::kNumber)) {
++    ValueNode* value =
++        AddNewNodeNoInputConversion<TruncateCheckedNumberOrOddballToInt32>(
++            {object}, NodeType::kNumber);
++    return AddNewNodeNoInputConversion<CheckedSmiTagInt32>({value});
++  }
++
+   // Untagged constants in Smi range don't need runtime checks.
+   switch (object->opcode()) {
+     case Opcode::kInt32Constant:
