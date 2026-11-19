@@ -25,6 +25,14 @@
       "summary": "Untagged numeric Phi loses HeapObjectness; its CheckHeapObject is replaced by Identity.",
       "expects": "any input that reaches a Phi with mixed Smi/HeapNumber input and a HeapObject consumer diverges in the maglev config",
       "validated": false
+    },
+    {
+      "id": "backedge-type",
+      "patch": "canary/backedge-type.patch",
+      "channel": "header type (MergeLoopValue)",
+      "summary": "The back edge type is never merged into post_loop_type; the header type is promoted without re-validation.",
+      "expects": "any loop whose back edge merges a HeapNumber over a Smi header diverges (crash: Operand is not a smi); a peeled iteration widens the header type at build time and hides the fault, so sweep with --no-maglev-loop-peeling",
+      "validated": true
     }
   ]
 }

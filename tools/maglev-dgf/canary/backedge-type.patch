@@ -1,0 +1,34 @@
+diff --git a/src/maglev/maglev-interpreter-frame-state.cc b/src/maglev/maglev-interpreter-frame-state.cc
+index 09a220d74f6..520872874b8 100644
+--- a/src/maglev/maglev-interpreter-frame-state.cc
++++ b/src/maglev/maglev-interpreter-frame-state.cc
+@@ -883,7 +883,12 @@ void MergePointInterpreterFrameState::MergeLoopValue(
+                           predecessors_[predecessors_so_far_]);
+   result->set_input(predecessor_count_ - 1, unmerged);
+ 
+-  result->merge_post_loop_type(unmerged_type);
++  // DGF canary: the back edge type is not merged into `post_loop_type`, so
++  // `promote_post_loop_type` below installs the header's union unconditionally
++  // and the value delivered by the back edge is never re-validated against the
++  // type the loop header was compiled for. Not part of the shipping graph
++  // builder: `dgf.py canary` applies and reverts this hunk.
++  USE(unmerged_type);
+   // We've just merged the backedge, which means that future uses of this Phi
+   // will be after the loop, so we can now promote `post_loop_type` to the
+   // regular `type`.
+diff --git a/src/maglev/maglev-ir.h b/src/maglev/maglev-ir.h
+index a5545ff8d07..855920e2f28 100644
+--- a/src/maglev/maglev-ir.h
++++ b/src/maglev/maglev-ir.h
+@@ -10220,7 +10220,10 @@ class Phi : public ValueNodeT<Phi> {
+   void promote_post_loop_type() {
+     DCHECK(is_unmerged_loop_phi());
+     // TODO(428667907): Ideally we should bail out early for the kNone type.
+-    DCHECK(NodeTypeIs(post_loop_type_, type_, NodeTypeIsVariant::kAllowNone));
++    // DGF canary: `post_loop_type` (the header's union) overwrites `type_`
++    // without checking that it still covers the types merged from the back
++    // edge, i.e. the back edge is not re-validated. Not part of the shipping
++    // compiler: `dgf.py canary` applies and reverts this hunk.
+     type_ = post_loop_type_;
+   }
+ 
