@@ -361,13 +361,15 @@ perturb the very elision it is supposed to observe; run the assertion build and
 the graph-print build separately and compare.
 
 A note on catalog wiring: `dgf.py` passes `trace_flags` verbatim to d8 and
-strips them for the `maglev_clean` run (`README.md:41-47`). Putting
-`--maglev-non-eager-inlining` there therefore makes `maglev` and `maglev_clean`
-differ in *semantics* — eager inlining on one side, the replay on the other.
-That is acceptable (both tiers must print the same values) and turns the
-existing differential into a free eager-vs-non-eager comparison, but the seed's
-`// Flags:` line must carry the flag as well so that mjsunit and foozzie run
-the same configuration the target checks.
+strips them for the `maglev_clean` run (`README.md:41-47`). A flag that changes
+*which graph is built* therefore belongs in `config_flags`, which are passed to
+the traced run, to the untraced differential run and to `verify` alike:
+`--maglev-non-eager-inlining` is one of them. It was originally listed in
+`trace_flags`, so `maglev_clean` silently ran the *eager* path and the
+differential was really an eager-vs-non-eager comparison — §10.2 shows how that
+hid a canary that had fired by hand. The seed's `// Flags:` line must carry the
+flag as well so that mjsunit and foozzie run the configuration the target
+checks.
 
 ### 6.4 Catalog entry
 
@@ -386,10 +388,8 @@ has no elision assertion. A new entry:
     "src/maglev/maglev-reducer-inl.h:MaglevReducer::BuildCheckSmi",
     "src/maglev/maglev-reducer-inl.h:MaglevReducer::BuildSmiUntag"
   ],
-  "trace_flags": [
-    "--maglev-non-eager-inlining", "--trace-maglev-inlining",
-    "--print-maglev-graph"
-  ],
+  "config_flags": ["--maglev-non-eager-inlining"],
+  "trace_flags": ["--trace-maglev-inlining", "--print-maglev-graph"],
   "required_patterns": ["INLINE", "UnsafeSmiUntag"],
   "seed": "seeds/10_kna_replay_elision.js",
   "trigger": [
@@ -585,3 +585,132 @@ value computable by hand so the index-tier run agrees.
 * Reachability is textual: `UnsafeSmiUntag` also appears in graphs whose proof
   is a dominating `CheckMaps`, so the pattern proves the *elision*, not its
   staleness.
+* The canary of §10.2 validates the *verifier*, not the mechanism map: it
+  shows the two detectors fire when a proof is taken on faith, and says
+  nothing about whether the shipping compiler has such a bug.
+
+## 10. Phases 3 and 4: directed mutation and deterministic verification
+
+§6 built one input by hand. §10 is the automated version of the same
+reasoning: `dgf.py direct` spends the mutation budget on the values §4 names,
+and `dgf.py verify` decides whether a result means anything, using
+`dgf.py canary` as the control that keeps the verifier honest.
+
+The difference from a template-based Maglev type-confusion fuzzer is where the
+shape comes from. A template fuzzer compiles a fixed shape and hopes that the
+interesting instantiation appears. Here the shape is §6's, chosen because
+§3–§5 make it the smallest ordering that puts a snapshot between a recorded
+type and a use; what the search varies is only the three values that decide
+whether the elision at the end of that shape is *observable*, and the graph
+signature is what tells it whether a unit of budget changed the compilation at
+all.
+
+### 10.1 Directed mutation
+
+A template (`templates/kna_replay_elision.tmpl.js`) is §6's shape with three
+slots and nothing else:
+
+| Slot | What it controls | Candidates |
+| ---- | ---------------- | ---------- |
+| `SMI_CONST` | the constant at the `BuildCheckSmi` site, i.e. the input the check derives from | `1`, `-1`, `0`, `1073741823`, `1073741824`, `2147483647` |
+| `BACKEDGE` | the loop-carried value whose merged type `promote_post_loop_type` may rewrite | six shapes, from `n` to `(n + bump(o.x) + load(o)) * 1.5` |
+| `ARG_VALUE` | the representation of the argument at the inlined call, which is what a replayed snapshot sees through the shared node | `2.5`, `-0`, `1073741824`, `-1073741824`, `2147483647`, `0.1` |
+
+The catalog carries the candidates (`targets.json`:
+`kna-replay-elision.directed`), so widening the campaign is a catalog edit,
+not a code change. 6 × 6 × 6 = 216 points, enumerated exhaustively. Two
+properties make every point a legal input:
+
+* candidates `print()` instead of asserting, so no expectation has to move and
+  the baseline run of the differential *is* the expectation;
+* the shape is untouched, so reachability is still decided by the target's
+  trace patterns rather than by the slot values.
+
+Coverage feedback is the graph dump. `coverage_signature()` reduces a
+`--print-maglev-graph` run to the sorted multiset of node opcodes plus the
+count of non-eager inlining events; an unseen signature is a new optimization
+path and is stored in `corpus/<target>.json` with the slots that produced it.
+
+Measured (`out/x64.asan-fuzz`, 216 points, `--random-seed 1`):
+
+```
+candidates=216 hit=216 miss=0 new_paths=39 divergences=0 corpus=39
+```
+
+Every point still reached `INLINE` + `UnsafeSmiUntag`: changing these values
+does not cost the target. The 216 points map onto 39 distinct signatures,
+which is the useful part of the result. What a point changes is the arithmetic
+around the elision, and the signature says so before any output does. One
+sample point (`SMI_CONST` = `1073741824`, `BACKEDGE` =
+`(n + bump(o.x) + load(o)) * 1.5`, `ARG_VALUE` = `2.5`) diffs against the
+seed as `+Int32Add -Int32AddWithOverflow -Int32IncrementWithOverflow`: without
+the `| 0`, the loop body is built with a different arithmetic family, while
+`UnsafeSmiUntag` stays in the node set on both sides.
+
+### 10.2 Deterministic verification
+
+`verify` runs the differential and the `--maglev-assert-types` build, repeats
+both against the canary, and classifies:
+
+| clean | canary | verdict |
+| ----- | ------ | ------- |
+| fires | fires | `candidate` |
+| fires | — | `candidate` |
+| does not fire | fires | `canary-only`, discarded |
+| does not fire | does not fire | `clean` (or `unreached`) |
+
+The canary is a build in which one proof is taken on faith
+(`canary/elide-check-smi.patch`: `BuildCheckSmi` records `kSmi` and then
+elides the check that would justify it). Measured on the seed of §7:
+
+```
+[CANARY-ONLY] seeds/10_kna_replay_elision.js
+        differential=- assert-types=- canary=FIRES
+        canary divergence: crash mismatch: maglev=CRASH(rc=-6) baseline=rc=0
+```
+
+and, on the canary, the Maglev frame aborts with `abort: Operand is not a
+smi` on `<HeapNumber 2.5>` inside `driver` — the `UnsafeSmiUntag` of §5
+reading a heap number. On the clean build both detectors stay silent, which is
+§9's restated point: the elision is sound today because the store's own
+`CheckSmi` deopts first.
+
+Verifying the 39 new-path candidates of §10.1 through the same pipeline:
+
+```
+39 candidate(s): canary-only=20, clean=19
+clean: differential 0, assert-types 0
+canary: differential 20, assert-types 20
+```
+
+The canary's firing set is *input-dependent*: 20 of the 39 candidates reach
+the point where the elided check matters, the other 19 hit a different check
+(an argument conversion) first. A control that fired for every candidate would
+be a constant, not a control.
+
+Two harness bugs were found this way, and both had hidden the canary:
+
+1. `--maglev-non-eager-inlining` sat in `trace_flags`, so the untraced
+   differential ran the *eager* path (the note in §6.3). The canary fired by
+   hand but not under `verify`. Flags that change which graph is built are now
+   `config_flags` and reach every run.
+2. The first version of the fault elided the check *before* `EnsureType` had
+   recorded the type. That trips a DCHECK in a dcheck build —
+   `CanElideWriteBarrier(object, value)` (`maglev-reducer-inl.h:630-656`)
+   reads the type that `BuildCheckSmi` just recorded — so the graph never
+   built. Recording the fact and skipping the check is both buildable and the
+   faithful emulation of a stale proof.
+
+### 10.3 What this does not do
+
+* The canary is a detector control. It removes the check the shipping
+  compiler emits; it does not reproduce the *ordering* that would make a real
+  proof stale (§4), so a `candidate` from this pipeline still needs §7-style
+  graph evidence that the proof it trusted was the wrong one.
+* The signature is textual and coarse: the same opcode multiset can hide
+  different control flow. It is a filter for "did this mutation change the
+  compilation", not coverage instrumentation, and the corpus is never
+  minimized.
+* Mutation is still one-dimensional: three slots, one template, one target.
+  `fuzz` covers shapes, `direct` covers values; neither explores a different
+  *number* of call sites.

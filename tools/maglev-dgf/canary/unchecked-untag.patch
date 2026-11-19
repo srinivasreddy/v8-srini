@@ -1,0 +1,11 @@
+--- a/src/maglev/maglev-reducer-inl.h
++++ b/src/maglev/maglev-reducer-inl.h
+@@ -3212,7 +3212,7 @@
+       known_node_aspects().EnsureType(broker(), node, NodeType::kSmi);
+   if (ensure_res == EnsureTypeResult::kContradiction) {
+     return EmitUnconditionalDeopt(DeoptimizeReason::kNotASmi);
+-  } else if (ensure_res == EnsureTypeResult::kAlreadyHadType) {
++  } else if (ensure_res != EnsureTypeResult::kContradiction) {
+     return AddNewNodeNoInputConversion<UnsafeSmiUntag>({node});
+   } else {
+     return AddNewNodeNoInputConversion<CheckedSmiUntag>({node});

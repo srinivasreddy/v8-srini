@@ -6,13 +6,15 @@ adds the missing piece: a way to say *"this input compiled through the Maglev
 subsystem I care about"*, instead of hoping that random mutation happens to
 build the right nodes.
 
-It consists of three parts:
+It consists of these parts:
 
 | Path           | Role |
 | -------------- | ---- |
-| `targets.json` | Catalog: subsystem, C++ entry points, the d8 trace configuration that proves reachability, and the seed that reaches it. |
+| `targets.json` | Catalog: subsystem, C++ entry points, the d8 trace configuration that proves reachability, the seed that reaches it, and (optionally) the directed-mutation slots of that seed. |
 | `seeds/*.js`   | Hand-written, self-checking inputs. They assert only that Maglev was used (guarded `%ActiveTierIsMaglev`) and that their expected values are right. |
-| `dgf.py`       | Driver: `targets` (list), `check` (reachability + differential), `fuzz` (target-aware mutation). |
+| `dgf.py`       | Driver: `targets` (list), `check` (reachability + differential), `fuzz` (target-aware mutation), `direct` (value-directed mutation), `verify` (deterministic verification), `canary` (injected-fault build). |
+| `templates/*.tmpl.js` | Slot templates for `direct`: the same shape as a seed, with the facts that control a representation proof left as `{{SLOT}}` markers. |
+| `canary/*.patch` | Injected faults for `verify`'s positive control: one proof taken on faith, applied to the source and built into a separate d8. |
 
 ## Why not intrinsics
 
@@ -40,11 +42,18 @@ report that it removed one.
 
 Every run compares three d8 invocations:
 
-1. `maglev` – the catalog's `trace_flags` plus the `ignition_maglev` config
-   (`--maglev --turbo-filter=~ --no-turbofan`);
+1. `maglev` – the catalog's `config_flags` and `trace_flags` plus the
+   `ignition_maglev` config (`--maglev --turbo-filter=~ --no-turbofan`);
 2. `maglev_clean` – the same config *without* the trace flags, so its output is
    comparable to the baseline;
 3. `baseline` – `ignition` (`--no-maglev --no-turbofan`).
+
+`config_flags` are part of the configuration and reach all three runs (the
+baseline run ignores the Maglev ones); `trace_flags` only make the Maglev run
+observable and are dropped for the comparison. A flag that changes which graph
+is built, such as `--maglev-non-eager-inlining`, must be a `config_flag` —
+otherwise the traced run and the differential run compile different programs
+and the differential stops measuring the configuration the target claims.
 
 Both configurations also get `--allow-natives-syntax
 --optimize-on-next-call-optimizes-to-maglev` (the seeds call
@@ -73,6 +82,17 @@ python3 tools/maglev-dgf/dgf.py check --no-differential
 # Mutate the seed of a target and diff the mutants.
 python3 tools/maglev-dgf/dgf.py fuzz --target osr-entry --iterations 50 \
     --random-seed 1 --log /tmp/dgf.jsonl
+
+# Mutate only the values that control a representation proof (needs a
+# "directed" section in the catalog entry).
+python3 tools/maglev-dgf/dgf.py direct --target kna-replay-elision \
+    --iterations 20 --random-seed 1 -v
+
+# Deterministic verification, optionally against an injected-fault build.
+python3 tools/maglev-dgf/dgf.py canary --fault elide-check-smi
+python3 tools/maglev-dgf/dgf.py verify kna-replay-elision \
+    --d8 out/x64.asan-fuzz/d8.dgf-clean \
+    --canary-d8 out/x64.asan-fuzz/d8.dgf-canary -v
 ```
 
 `--d8` selects the binary; by default the script picks the first existing
@@ -113,6 +133,74 @@ the seed's self-check still holds and any output difference is a compiler bug:
 mutant uses it. Up to `--max-mutations` (default 2) distinct mutators are
 applied per mutant.
 
+## Directed mutation (`direct`)
+
+`fuzz` mutates structure and hopes the shape survives; `direct` reasons about
+which values the shape needs. It renders a template whose slots are exactly the
+facts that can make a representation proof stale — the loop backedge value, the
+constant at a `BuildCheckSmi` site, and the representation of the argument of
+an inlined call — and changes nothing else:
+
+```bash
+python3 tools/maglev-dgf/dgf.py direct --target kna-replay-elision \
+    --iterations 20 --random-seed 1 -v
+```
+
+Candidates are *mutants, not seeds*: they `print()` their results instead of
+asserting them, so every slot combination is a valid input and the baseline run
+of the differential supplies the expected values (§8 of
+`elision_proof_analysis.md` explains why this keeps the seed's oracle intact).
+
+Coverage feedback is the graph dump, not a sanitizer hook. Every candidate is
+compiled with the target's `trace_flags`, and its node-opcode multiset plus
+its non-eager inlining count becomes a signature
+(`coverage_signature`). A signature that was not seen before is a new
+optimization path, is saved under `mutants/<target>/`, and is recorded in
+`corpus/<target>.json` together with the slot values that produced it, so a
+re-run with a wider `--iterations` starts where the previous one stopped.
+`-v` prints the opcode delta against the seed, which is how a mutation that
+switches `CheckSmi` for `UnsafeSmiUntag` (or `Int32Add` for `Float64Add`) is
+visible at a glance.
+
+## Deterministic verification (`verify`, `canary`)
+
+`verify` runs the two detectors that decide whether a candidate is real:
+
+```bash
+python3 tools/maglev-dgf/dgf.py verify kna-replay-elision -v
+python3 tools/maglev-dgf/dgf.py verify mutants/kna-replay-elision/...js \
+    --target kna-replay-elision --canary-d8 out/x64.asan-fuzz/d8.dgf-canary
+```
+
+1. `differential` — the Maglev and the baseline configuration, same input,
+   normalized output;
+2. `assert-types` — `--maglev-assert-types`, which emits a `CheckMaglevType`
+   node for every KNA type read and traps when the runtime value disagrees
+   with the compile-time fact.
+
+Both are deterministic. To show that they *would* fire if the proof were wrong,
+`canary` builds a d8 in which one proof is taken on faith, and installs it
+next to the clean build:
+
+```bash
+python3 tools/maglev-dgf/dgf.py canary --list
+python3 tools/maglev-dgf/dgf.py canary --fault elide-check-smi
+# applies canary/elide-check-smi.patch, builds out/x64.asan-fuzz/d8,
+# copies it to d8.dgf-canary (+ .json), reverts the patch, rebuilds the clean d8
+```
+
+The verdict is then a 2×2:
+
+| clean build | canary build | verdict |
+| ----------- | ------------ | ------- |
+| fires | fires | `candidate` — a compiler bug candidate |
+| fires | does not fire | `candidate` (the canary is not needed) |
+| does not fire | fires | `canary-only` — the canary's own footprint, discarded |
+| does not fire | does not fire | `clean` — or `unreached`, if the target's trace did not match |
+
+`verify` exits non-zero when it produced a `candidate`, so a loop over a mutant
+directory stops on the first real finding instead of burying it in a log.
+
 ## Adding a target
 
 1. Write a self-checking seed under `seeds/`: warm up, call
@@ -130,8 +218,11 @@ applied per mutant.
    ```
 
 3. Add the entry to `targets.json` (`id`, `subsystem`, `phase`, `sources`,
-   `trace_flags`, `hit_patterns` / `required_patterns`, `seed`, `trigger`,
-   `bug_classes`, `oracle`).
+   `trace_flags` / `config_flags`, `hit_patterns` / `required_patterns`,
+   `seed`, `trigger`, `bug_classes`, `oracle`). A flag that changes which graph
+   is built (for example `--maglev-non-eager-inlining`) belongs in
+   `config_flags`: it is passed to every run, including the differential and
+   `verify`, while `trace_flags` are only passed to the traced run.
 4. Run `python3 tools/maglev-dgf/dgf.py check <id> -v` and confirm `[HIT ]`
    plus, for `--trace-maglev-escape-analysis`, that the pattern matches the
    line you expect.
@@ -156,3 +247,15 @@ python3 tools/clusterfuzz/foozzie/v8_foozzie.py \
   match unrelated output. `required_patterns` exists for that reason.
 * Mutation is textual and assumes the seeds keep their small, single-statement
   shape; a mutator that cannot apply returns `None` instead of guessing.
+* `direct` needs a `directed` section in the catalog and a template whose
+  slots are the values under study; it does not derive either from a seed.
+* The coverage signature is a graph-dump fingerprint, not edge coverage: it
+  answers "did this value change the compilation", and can be blind to two
+  graphs that differ only in control flow.
+* `canary` patches the working tree, builds in an existing `out/` directory,
+  and rebuilds it afterwards; it needs `autoninja` and a configured build. It
+  saves the pre-patch binary as `d8.dgf-clean` (used as `verify --d8`) and the
+  patched one as `d8.dgf-canary`. If a build is interrupted, the patch is
+  still applied: `dgf.py canary --fault ID --revert`.
+* A canary is a detector control, not a bug emulation: `canary-only` means the
+  verifier works, `candidate` means the clean build reproduced the finding.

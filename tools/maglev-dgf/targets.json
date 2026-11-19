@@ -250,13 +250,48 @@
         "src/maglev/maglev-reducer-inl.h:MaglevReducer::BuildCheckSmi",
         "src/maglev/maglev-reducer-inl.h:MaglevReducer::BuildSmiUntag"
       ],
+      "config_flags": ["--maglev-non-eager-inlining"],
       "trace_flags": [
-        "--maglev-non-eager-inlining",
         "--trace-maglev-inlining",
         "--print-maglev-graph"
       ],
       "required_patterns": ["INLINE", "UnsafeSmiUntag"],
       "seed": "seeds/10_kna_replay_elision.js",
+      "directed": {
+        "template": "templates/kna_replay_elision.tmpl.js",
+        "slots": {
+          "SMI_CONST": [
+            "1",
+            "-1",
+            "0",
+            "1073741823",
+            "1073741824",
+            "2147483647"
+          ],
+          "BACKEDGE": [
+            "(n + bump(o.x) + load(o)) | 0",
+            "(n + load(o)) | 0",
+            "(n + bump(o.x)) | 0",
+            "n",
+            "((n + bump(o.x) + load(o)) | 0) | 0",
+            "(n + bump(o.x) + load(o)) * 1.5"
+          ],
+          "ARG_VALUE": [
+            "2.5",
+            "-0",
+            "1073741824",
+            "-1073741824",
+            "2147483647",
+            "0.1"
+          ]
+        },
+        "fixed": {
+          "WARMUP_OBJECT": "{x: 3}",
+          "WARMUP_VALUE": "3",
+          "LOOP_OBJECT": "{x: 1}",
+          "LOOP_LIMIT": "2"
+        }
+      },
       "trigger": [
         "three %DisableEagerInlining-marked callees called from one driver;",
         "the first mutates the field whose Smi-representation load the others",

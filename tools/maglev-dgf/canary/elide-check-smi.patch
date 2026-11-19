@@ -1,0 +1,16 @@
+diff --git a/src/maglev/maglev-reducer-inl.h b/src/maglev/maglev-reducer-inl.h
+index 731237febc6..2ba2b163652 100644
+--- a/src/maglev/maglev-reducer-inl.h
++++ b/src/maglev/maglev-reducer-inl.h
+@@ -3154,6 +3154,11 @@ template <typename BaseT>
+ ReduceResult MaglevReducer<BaseT>::BuildCheckSmi(ValueNode* object) {
+   if (object->StaticTypeIs(broker(), NodeType::kSmi)) return object;
+   RETURN_IF_DONE(EnsureType(object, NodeType::kSmi, DeoptimizeReason::kSmi));
++  // DGF canary: the caller's type is now recorded as kSmi, but the runtime
++  // check that would justify it is elided, i.e. the proof is taken on faith.
++  // Not part of the shipping compiler: `dgf.py canary` applies and reverts
++  // this hunk.
++  return object;
+ 
+   // Untagged constants in Smi range don't need runtime checks.
+   switch (object->opcode()) {

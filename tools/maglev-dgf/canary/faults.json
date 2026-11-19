@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "//": "Phase 4 positive controls. Each fault is a source patch under which one representation proof is trusted without evidence, so that a directed mutant which passes it must be caught by the differential or by --maglev-assert-types. `dgf.py canary --fault ID` applies, builds, installs and reverts.",
+  "faults": [
+    {
+      "id": "elide-check-smi",
+      "patch": "canary/elide-check-smi.patch",
+      "channel": "proof elision (BuildCheckSmi)",
+      "summary": "BuildCheckSmi records kSmi and then elides the runtime check that would justify it.",
+      "expects": "any input that reaches a BuildCheckSmi site diverges in the maglev config",
+      "validated": true
+    },
+    {
+      "id": "unchecked-untag",
+      "patch": "canary/unchecked-untag.patch",
+      "channel": "proof elision (BuildSmiUntag)",
+      "summary": "BuildSmiUntag untags unsafely when the type was just updated, not only when it already matched.",
+      "expects": "inputs that reach BuildSmiUntag with a fresh kSmi fact diverge",
+      "validated": false
+    }
+  ]
+}

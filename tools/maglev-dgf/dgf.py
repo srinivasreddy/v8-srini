@@ -22,6 +22,14 @@ Subcommands:
   check [ID ...]          run each seed and assert its target is hit
   fuzz --target ID        mutate a seed, keep mutants that still hit the
                           target, and diff them against the baseline config
+  direct --target ID      mutate only the values that control a representation
+                          proof, and keep the mutants that reach a new
+                          optimization path (coverage from the graph dump)
+  verify FILE ...         deterministic verification of a candidate: clean
+                          differential, --maglev-assert-types, and (optionally)
+                          an injected-fault canary build
+  canary --fault ID       build a d8 with one representation proof
+                          unconditionally trusted, for the positive control
 
 The reachability oracle is deliberately *not* an intrinsic: seeds only assert
 that the Maglev tier was used (guarded `%ActiveTierIsMaglev`) and that their
@@ -37,7 +45,9 @@ All d8 invocations use the build from the V8 checkout this script lives in
 from __future__ import annotations
 
 import argparse
+import collections
 import dataclasses
+import hashlib
 import json
 import os
 import random
@@ -53,6 +63,9 @@ from typing import Iterable, Sequence
 HERE = Path(__file__).resolve().parent
 V8_ROOT = HERE.parent.parent
 DEFAULT_TARGETS = HERE / "targets.json"
+TEMPLATES = HERE / "templates"
+CANARY_DIR = HERE / "canary"
+DEFAULT_CORPUS = HERE / "corpus"
 
 # Mirrors tools/clusterfuzz/foozzie/v8_commands.py:DEFAULT_FLAGS so that a
 # divergence found here reproduces under v8_foozzie.py.
@@ -244,8 +257,16 @@ def evidence(target: dict, output: str, limit: int = 3) -> list[str]:
 
 def maglev_flags(target: dict, extra: Sequence[str] = (),
                  trace: bool = True) -> list[str]:
+    """Flags for the Maglev configuration.
+
+    `config_flags` are part of the configuration, not of the tracing: they
+    change which graph is built (e.g. --maglev-non-eager-inlining), so they
+    are also passed to the runs that are compared against the baseline.
+    `trace_flags` only make the run observable and may be dropped.
+    """
     flags = (FOOZZIE_COMMON_FLAGS + CONFIG_FLAGS["ignition_maglev"] +
-             SEED_FLAGS + list(extra))
+             SEED_FLAGS + list(target.get("config_flags") or []) +
+             list(extra))
     if trace:
         flags += list(target.get("trace_flags") or [])
     return flags
@@ -333,6 +354,20 @@ def compare(maglev: D8Result, baseline: D8Result) -> str | None:
 
 
 
+def differential_check(d8: Path, target: dict, testcase: Path, timeout: float,
+                       extra_flags: Sequence[str] = ()
+                       ) -> tuple[D8Result, D8Result, str | None]:
+    """Runs the same input in the Maglev and the baseline configuration.
+
+    Trace flags dump the graph, which is not comparable across tiers, so this
+    repeats the Maglev config *without* them.
+    """
+    maglev_clean = run_d8(
+        d8, testcase, maglev_flags(target, extra_flags, trace=False), timeout)
+    baseline = run_d8(d8, testcase, baseline_flags(extra_flags), timeout)
+    return maglev_clean, baseline, compare(maglev_clean, baseline)
+
+
 def check_target(d8: Path, target: dict, timeout: float,
                  differential: bool = True,
                  extra_flags: Sequence[str] = (),
@@ -354,13 +389,8 @@ def check_target(d8: Path, target: dict, timeout: float,
         missing=missing,
     )
     if differential:
-        # Trace flags dump the graph, which is not comparable across tiers,
-        # so the differential run repeats the same config without them.
-        report.maglev_clean = run_d8(
-            d8, seed, maglev_flags(target, extra_flags, trace=False), timeout)
-        report.baseline = run_d8(d8, seed, baseline_flags(extra_flags),
-                                 timeout)
-        report.divergence = compare(report.maglev_clean, report.baseline)
+        report.maglev_clean, report.baseline, report.divergence = (
+            differential_check(d8, target, seed, timeout, extra_flags))
     return report
 
 
@@ -695,6 +725,446 @@ def mutate_source(src: str, rng: random.Random,
 
 
 # --------------------------------------------------------------------------
+# Phase 3: directed mutation
+#
+# `fuzz` mutates *structure*; `direct` mutates only the values that control a
+# representation proof and leaves the shape of the program alone. The
+# candidates come from a template whose slots are the facts that §4 of
+# elision_proof_analysis.md identifies as able to go stale:
+#
+#   SMI_CONST  the constant at a BuildCheckSmi site, i.e. the input the
+#              check is derived from (in Smi range, at the boundary, outside)
+#   BACKEDGE   the loop-carried value the backedge merges, which decides the
+#              phi type that promote_post_loop_type may rewrite
+#   ARG_VALUE  the representation of the value passed to an inlined call,
+#              which is what a replayed snapshot sees through the argument
+#              node it shares with the caller
+#
+# A candidate prints its results instead of asserting them, so every slot
+# combination is a valid input and the baseline run supplies the expected
+# values. "Did the mutation reach a new optimization path" is answered by the
+# graph dump rather than by a sanitizer hook: --print-maglev-graph prints the
+# final node list, which is the granularity at which a value mutation changes
+# the pipeline (CheckSmi vs UnsafeSmiUntag, Int32Add vs Float64Add).
+# --------------------------------------------------------------------------
+
+SLOT_RE = re.compile(r"\{\{([A-Z][A-Z0-9_]*)\}\}")
+# Node lines look like "  17/11: UnsafeSmiUntag [v16/n10:[rax|R|t]] -> ...";
+# the "id/deopt-id" half is optional depending on the graph printer.
+GRAPH_NODE_RE = re.compile(r"^\s*\d+(?:/\d+)?:\s+([A-Za-z][A-Za-z0-9_]*)")
+
+
+def render_template(source: str, values: dict) -> str:
+    """Substitutes {{SLOT}} markers; an unset slot is an error, not a guess."""
+    def replace(match: re.Match) -> str:
+        name = match.group(1)
+        if name not in values:
+            raise SystemExit(f"template slot {name} has no value")
+        return str(values[name])
+
+    return SLOT_RE.sub(replace, source)
+
+
+@dataclasses.dataclass
+class Signature:
+    """Coarse path signature of one Maglev compilation."""
+    digest: str
+    opcodes: dict[str, int]
+    inlines: int
+
+    def delta(self, other: "Signature") -> str:
+        """Opcode set difference: `+` new nodes, `-` dropped ones."""
+        added = sorted(set(self.opcodes) - set(other.opcodes))
+        removed = sorted(set(other.opcodes) - set(self.opcodes))
+        parts = [f"+{name}" for name in added[:6]]
+        parts += [f"-{name}" for name in removed[:6]]
+        return " ".join(parts)
+
+
+def coverage_signature(output: str) -> Signature:
+    """Node-opcode multiset plus the non-eager inlining count.
+
+    Addresses, node ids and immediates are dropped, so the signature is
+    stable across runs; opcode *counts* are kept, because "one more CheckSmi"
+    is a different path.
+    """
+    opcodes: dict[str, int] = collections.Counter()
+    inlines = 0
+    for line in strip_ansi(output).splitlines():
+        if "INLINE" in line:
+            inlines += 1
+            continue
+        match = GRAPH_NODE_RE.match(line)
+        if match:
+            opcodes[match.group(1)] += 1
+    key = json.dumps([sorted(opcodes.items()), inlines])
+    return Signature(hashlib.sha1(key.encode()).hexdigest()[:16], opcodes,
+                     inlines)
+
+
+def slot_combinations(spec: dict, rng: random.Random,
+                      iterations: int) -> list[dict]:
+    """Draws `iterations` distinct slot combinations; all of them if fewer."""
+    families = {name: [str(v) for v in values]
+                for name, values in (spec.get("slots") or {}).items()}
+    if not families:
+        raise SystemExit("target has no 'directed.slots'")
+    names = list(families)
+    total = 1
+    for name in names:
+        total *= len(families[name])
+    if iterations >= total:
+        indices = list(range(total))
+    else:
+        indices = sorted(rng.sample(range(total), iterations))
+    combos = []
+    for index in indices:
+        combo = {}
+        for name in names:
+            values = families[name]
+            combo[name] = values[index % len(values)]
+            index //= len(values)
+        combos.append(combo)
+    return combos
+
+
+def cmd_direct(args, targets: list[dict]) -> int:
+    d8 = require_d8(Path(args.d8) if args.d8 else default_d8())
+    target = find_target(targets, args.target)
+    spec = target.get("directed")
+    if not spec:
+        raise SystemExit(f"target {target['id']} has no 'directed' section")
+    template = (HERE / spec["template"]).read_text()
+    fixed = dict(spec.get("fixed") or {})
+    rng = random.Random(args.random_seed)
+    combos = slot_combinations(spec, rng, args.iterations)
+
+    outdir = Path(args.out) / target["id"]
+    outdir.mkdir(parents=True, exist_ok=True)
+    corpus_file = Path(args.corpus) / f"{target['id']}.json"
+    corpus_file.parent.mkdir(parents=True, exist_ok=True)
+    corpus = (json.loads(corpus_file.read_text()) if corpus_file.exists()
+              else {})
+    seed_signature = coverage_signature(
+        run_d8(d8, seed_path(target), maglev_flags(target, args.extra_flag),
+               args.timeout).output)
+
+    stats = collections.Counter()
+    log = open(args.log, "a") if args.log else None
+    try:
+        for index, combo in enumerate(combos):
+            values = {**fixed, **combo}
+            source = render_template(template, values)
+            label = " ".join(f"{k}={v}" for k, v in sorted(combo.items()))
+            with tempfile.TemporaryDirectory(prefix="dgf-direct-") as tmp:
+                testcase = Path(tmp) / f"{target['id']}-{index:04d}.js"
+                testcase.write_text(source)
+                trace = run_d8(d8, testcase,
+                               maglev_flags(target, args.extra_flag),
+                               args.timeout)
+                hits = count_hits(target, trace.output)
+                missing = missing_patterns(target, hits)
+                signature = coverage_signature(trace.output)
+                new_path = signature.digest not in corpus
+                _, baseline, divergence = differential_check(
+                    d8, target, testcase, args.timeout, args.extra_flag)
+                stats["candidates"] += 1
+                stats["hit" if not missing else "miss"] += 1
+                # Candidates print instead of asserting, so a baseline that
+                # fails its own check means the mutant is malformed, not that
+                # the compiler diverged.
+                if baseline.self_check_failed or baseline.crashed:
+                    stats["seed_broken"] += 1
+                    continue
+                if new_path:
+                    stats["new_paths"] += 1
+                    corpus[signature.digest] = {
+                        "slots": values,
+                        "inlines": signature.inlines,
+                        "nodes": len(signature.opcodes),
+                        "hits": hits,
+                    }
+                if divergence:
+                    stats["divergences"] += 1
+                if not (new_path or divergence or args.keep_all):
+                    continue
+                path = outdir / f"{target['id']}-{index:04d}.js"
+                path.write_text(source)
+                status = ("DIFF" if divergence else
+                          "NEW " if new_path else "...")
+                print(f"[{status}] {path.name}  {label}")
+                if args.verbose:
+                    print(f"        inlines={signature.inlines} "
+                          f"nodes={len(signature.opcodes)} "
+                          f"delta-vs-seed: "
+                          f"{signature.delta(seed_signature) or '-'}"
+                          + ("" if not missing
+                             else f"  missing: {', '.join(missing)}"))
+                if divergence:
+                    print(f"        {divergence}")
+            if log:
+                log.write(json.dumps({
+                    "target": target["id"],
+                    "slots": values,
+                    "signature": signature.digest,
+                    "new_path": new_path,
+                    "missing": missing,
+                    "divergence": divergence,
+                }) + "\n")
+                log.flush()
+    finally:
+        if log:
+            log.close()
+
+    corpus_file.write_text(json.dumps(corpus, indent=1, sort_keys=True) + "\n")
+    print(f"\ntarget={target['id']} candidates={stats['candidates']} "
+          f"hit={stats['hit']} miss={stats['miss']} "
+          f"new_paths={stats['new_paths']} "
+          f"divergences={stats['divergences']} "
+          f"corpus={len(corpus)} ({corpus_file})")
+    return 1 if stats["divergences"] else 0
+
+
+# --------------------------------------------------------------------------
+# Phase 4: deterministic verification
+#
+# Two detectors run on every candidate, in a fixed order:
+#
+#   differential   maglev vs ignition, same input, normalized output;
+#   assert-types   --maglev-assert-types, which turns a KNA type read into a
+#                  CheckMaglevType node that traps when the runtime value
+#                  disagrees with the compile-time fact (MaglevReducer::
+#                  GetType is its only emitter, so this observes the
+#                  consumers of the elided proof, not the elision itself).
+#
+# Both are deterministic: same binary, same input, same answer. The
+# injected-fault canary (`dgf.py canary`) exists to prove they *would* fire
+# if the proof were wrong. A candidate that only fires against the canary
+# build is the canary's own footprint and is discarded; a candidate that
+# fires on the clean build is a compiler bug candidate.
+# --------------------------------------------------------------------------
+
+ASSERT_TYPE_MARKER = "CheckMaglevType failed"
+
+
+def assert_types_result(d8: Path, target: dict, testcase: Path, timeout: float,
+                        extra_flags: Sequence[str] = ()) -> D8Result:
+    flags = maglev_flags(
+        target, list(extra_flags) + ["--maglev-assert-types"], trace=False)
+    return run_d8(d8, testcase, flags, timeout)
+
+
+def fires(result: D8Result) -> bool:
+    """True when a detector observed a violation, not merely a bad exit."""
+    return (result.crashed or result.returncode != 0 or
+            ASSERT_TYPE_MARKER in result.output)
+
+
+@dataclasses.dataclass
+class Verdict:
+    target_id: str
+    testcase: str
+    reached: bool
+    missing: list[str]
+    divergence: str | None
+    assert_fires: bool
+    canary: bool
+    canary_divergence: str | None
+    canary_assert_fires: bool
+    verdict: str
+
+    def to_json(self) -> dict:
+        return dataclasses.asdict(self)
+
+
+def classify(reached: bool, clean_fires: bool, canary_fires: bool) -> str:
+    if not reached:
+        return "unreached"
+    if clean_fires:
+        return "candidate"
+    if canary_fires:
+        return "canary-only"
+    return "clean"
+
+
+def verify_candidate(target: dict, d8: Path, canary: Path | None,
+                     testcase: Path, timeout: float,
+                     extra_flags: Sequence[str] = ()) -> Verdict:
+    trace = run_d8(d8, testcase, maglev_flags(target, extra_flags), timeout)
+    hits = count_hits(target, trace.output)
+    missing = missing_patterns(target, hits)
+    # A crash in the trace run already proves the input reached Maglev.
+    reached = not missing or trace.crashed
+    _, _, divergence = differential_check(d8, target, testcase, timeout,
+                                          extra_flags)
+    assert_fires = fires(
+        assert_types_result(d8, target, testcase, timeout, extra_flags))
+    clean_fires = divergence is not None or assert_fires
+
+    canary_divergence = None
+    canary_assert_fires = False
+    if canary is not None:
+        _, _, canary_divergence = differential_check(canary, target, testcase,
+                                                     timeout, extra_flags)
+        canary_assert_fires = fires(assert_types_result(
+            canary, target, testcase, timeout, extra_flags))
+    canary_fires = canary_divergence is not None or canary_assert_fires
+
+    return Verdict(
+        target_id=target["id"],
+        testcase=str(testcase),
+        reached=reached,
+        missing=missing,
+        divergence=divergence,
+        assert_fires=assert_fires,
+        canary=canary is not None,
+        canary_divergence=canary_divergence,
+        canary_assert_fires=canary_assert_fires,
+        verdict=classify(reached, clean_fires, canary_fires),
+    )
+
+
+def print_verdict(verdict: Verdict, verbose: bool = False) -> None:
+    print(f"[{verdict.verdict.upper()}] {verdict.testcase}")
+    detectors = [
+        "differential=" + ("FIRES" if verdict.divergence else "-"),
+        "assert-types=" + ("FIRES" if verdict.assert_fires else "-"),
+    ]
+    if verdict.canary:
+        canary_fires = bool(verdict.canary_divergence or
+                            verdict.canary_assert_fires)
+        detectors.append("canary=" + ("FIRES" if canary_fires else "-"))
+    print("        " + " ".join(detectors))
+    if verdict.missing:
+        print("        missing: " + ", ".join(verdict.missing))
+    if verdict.divergence:
+        print(f"        divergence: {verdict.divergence}")
+    if verdict.canary_divergence:
+        print(f"        canary divergence: {verdict.canary_divergence}")
+
+
+def cmd_verify(args, targets: list[dict]) -> int:
+    d8 = require_d8(Path(args.d8) if args.d8 else default_d8())
+    canary = None
+    if args.canary_d8:
+        canary = require_d8(Path(args.canary_d8))
+        if not Path(str(canary) + ".json").exists():
+            print(f"warning: {canary} has no {Path(str(canary)).name}.json; "
+                  f"build it with `dgf.py canary --fault ID`", file=sys.stderr)
+
+    known = {target["id"]: target for target in targets}
+    jobs: list[tuple[dict, Path]] = []
+    for item in args.items:
+        if item in known:
+            jobs.append((known[item], seed_path(known[item])))
+        elif args.target:
+            # Resolve: d8 runs with cwd set to the testcase's directory.
+            jobs.append((find_target(targets, args.target),
+                         Path(item).expanduser().resolve()))
+        else:
+            raise SystemExit(
+                f"{item}: not a target id; pass --target to verify a file")
+
+    verdicts = []
+    for target, testcase in jobs:
+        if not testcase.exists():
+            raise SystemExit(f"missing candidate {testcase}")
+        verdict = verify_candidate(target, d8, canary, testcase, args.timeout,
+                                   args.extra_flag)
+        verdicts.append(verdict)
+        if not args.json:
+            print_verdict(verdict, verbose=args.verbose)
+
+    if args.json:
+        print(json.dumps([v.to_json() for v in verdicts], indent=1))
+    counts = collections.Counter(v.verdict for v in verdicts)
+    summary = ", ".join(f"{name}={count}" for name, count in
+                        sorted(counts.items()))
+    # Keep stdout parseable in --json mode: the summary goes to stderr.
+    print(f"\n{len(verdicts)} candidate(s): {summary}",
+          file=sys.stderr if args.json else sys.stdout)
+    return 1 if counts.get("candidate") else 0
+
+
+def git_apply(patch: Path, reverse: bool) -> None:
+    cmd = ["git", "apply", "-p1"] + (["-R"] if reverse else []) + [str(patch)]
+    proc = subprocess.run(cmd, cwd=str(V8_ROOT), capture_output=True,
+                          text=True)
+    if proc.returncode != 0:
+        raise SystemExit(f"{' '.join(cmd)}\n{proc.stderr.strip()}")
+
+
+def cmd_canary(args, targets: list[dict]) -> int:
+    faults = json.loads((CANARY_DIR / "faults.json").read_text())["faults"]
+    if args.list:
+        width = max(len(f["id"]) for f in faults)
+        for fault in faults:
+            print(f"{fault['id']:<{width}}  {fault['channel']:<38}  "
+                  f"{fault['summary']}"
+                  + ("" if fault.get("validated") else "  [not built yet]"))
+        return 0
+    if not args.fault:
+        raise SystemExit("pass --fault ID (or --list)")
+    fault = next((f for f in faults if f["id"] == args.fault), None)
+    if fault is None:
+        raise SystemExit(f"unknown fault {args.fault!r}; try --list")
+
+    patch = HERE / fault["patch"]
+    config = Path(args.config)
+    install = (Path(args.install) if args.install
+               else config / "d8.dgf-canary")
+    clean_copy = config / "d8.dgf-clean"
+    print(f"[canary] {fault['id']}: {fault['summary']}")
+
+    if args.revert:
+        git_apply(patch, reverse=True)
+        print(f"[canary] reverted {patch.name}; rebuild with "
+              f"{args.builder} -C {config} d8")
+        return 0
+
+    # Keep a clean reference binary: `verify --d8 <clean> --canary-d8 <canary>`
+    # needs both at once, and the build directory holds only one.
+    if (config / "d8").exists() and not clean_copy.exists():
+        shutil.copy2(config / "d8", clean_copy)
+        print(f"[canary] kept the clean reference as {clean_copy}")
+
+    print(f"[canary] applying {patch.name}")
+    git_apply(patch, reverse=False)
+    if args.apply_only:
+        return 0
+
+    print(f"[canary] building d8 in {config} (this is a real build)")
+    if subprocess.run([args.builder, "-C", str(config), "d8"],
+                      cwd=str(V8_ROOT)).returncode != 0:
+        print("[canary] build failed; the patch is still applied "
+              f"(revert with: dgf.py canary --fault {fault['id']} --revert)",
+              file=sys.stderr)
+        return 1
+
+    shutil.copy2(config / "d8", install)
+    meta = Path(str(install) + ".json")
+    meta.write_text(json.dumps({
+        "fault": fault["id"],
+        "patch": fault["patch"],
+        "config": str(config),
+        "validated": fault.get("validated", False),
+        "built_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }, indent=1) + "\n")
+    print(f"[canary] installed {install} (+ {meta.name})")
+
+    if args.keep_source:
+        print("[canary] patch left applied (--keep-source)")
+        return 0
+    print(f"[canary] reverting {patch.name}")
+    git_apply(patch, reverse=True)
+    print(f"[canary] rebuilding the clean d8")
+    if subprocess.run([args.builder, "-C", str(config), "d8"],
+                      cwd=str(V8_ROOT)).returncode != 0:
+        return 1
+    return 0
+
+
+# --------------------------------------------------------------------------
 # Commands
 # --------------------------------------------------------------------------
 
@@ -856,6 +1326,54 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--log", default=None, help="append JSONL results here")
     p.add_argument("--allow-miss", dest="require_hit", action="store_false",
                    help="also report divergences that miss the target")
+
+    p = sub.add_parser("direct", parents=[common],
+                       help="mutate the values that control a proof")
+    p.add_argument("--target", required=True)
+    p.add_argument("--iterations", type=int, default=20,
+                   help="slot combinations to try (all of them if fewer)")
+    p.add_argument("--random-seed", type=int, default=None)
+    p.add_argument("--out", default=str(HERE / "mutants"),
+                   help="directory for new-path and diverging candidates")
+    p.add_argument("--corpus", default=str(DEFAULT_CORPUS),
+                   help="path-signature corpus (default: %(default)s)")
+    p.add_argument("--log", default=None, help="append JSONL results here")
+    p.add_argument("--keep-all", action="store_true",
+                   help="save every candidate, not only the interesting ones")
+    p.add_argument("-v", "--verbose", action="store_true")
+    p.add_argument("--extra-flag", action="append", default=[],
+                   help="extra d8 flag, may be repeated")
+
+    p = sub.add_parser("verify", parents=[common],
+                       help="deterministic verification of a candidate")
+    p.add_argument("items", nargs="+",
+                   help="candidate files, or target ids (their seeds)")
+    p.add_argument("--target", default=None,
+                   help="target whose trace flags to use for file arguments")
+    p.add_argument("--canary-d8", default=None,
+                   help="injected-fault build, from `canary --fault ID`")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("-v", "--verbose", action="store_true")
+    p.add_argument("--extra-flag", action="append", default=[],
+                   help="extra d8 flag, may be repeated")
+
+    p = sub.add_parser("canary", parents=[common],
+                       help="build a d8 with one proof trusted blindly")
+    p.add_argument("--list", action="store_true")
+    p.add_argument("--fault", default=None)
+    p.add_argument("--config", default="out/x64.asan-fuzz",
+                   help="build directory to patch and build "
+                        "(default: %(default)s)")
+    p.add_argument("--install", default=None,
+                   help="where to copy the canary d8 "
+                        "(default: <config>/d8.dgf-canary)")
+    p.add_argument("--builder", default="autoninja")
+    p.add_argument("--apply-only", action="store_true",
+                   help="apply the patch and stop")
+    p.add_argument("--keep-source", action="store_true",
+                   help="apply, build and install, but leave the patch applied")
+    p.add_argument("--revert", action="store_true",
+                   help="revert the patch of --fault and stop")
     return parser
 
 
@@ -868,6 +1386,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_check(args, targets)
     if args.cmd == "fuzz":
         return cmd_fuzz(args, targets)
+    if args.cmd == "direct":
+        return cmd_direct(args, targets)
+    if args.cmd == "verify":
+        return cmd_verify(args, targets)
+    if args.cmd == "canary":
+        return cmd_canary(args, targets)
     raise SystemExit(f"unknown command {args.cmd}")
 
 
