@@ -48,6 +48,8 @@ import argparse
 import collections
 import dataclasses
 import hashlib
+import heapq
+import itertools
 import json
 import os
 import random
@@ -856,13 +858,24 @@ def distance(sig: Signature, target: dict) -> int:
     return score
 
 
-def slot_combinations(spec: dict, rng: random.Random,
-                      iterations: int) -> list[dict]:
-    """Draws `iterations` distinct slot combinations; all of them if fewer."""
-    families = {name: [str(v) for v in values]
+def slot_families(spec: dict) -> dict[str, list[str]]:
+    """Slot name -> candidate values, in catalog order."""
+    families = {name: [str(value) for value in values]
                 for name, values in (spec.get("slots") or {}).items()}
     if not families:
         raise SystemExit("target has no 'directed.slots'")
+    return families
+
+
+def slot_key(values: dict, families: dict) -> tuple[str | None, ...]:
+    """Identity of one slot combination, independent of insertion order."""
+    return tuple(values.get(name) for name in families)
+
+
+def slot_combinations(spec: dict, rng: random.Random,
+                      iterations: int) -> list[dict]:
+    """Draws `iterations` distinct slot combinations; all of them if fewer."""
+    families = slot_families(spec)
     names = list(families)
     total = 1
     for name in names:
@@ -882,16 +895,41 @@ def slot_combinations(spec: dict, rng: random.Random,
     return combos
 
 
+def single_slot_mutations(values: dict, families: dict) -> list[dict]:
+    """The one-slot neighbourhood of a combination, in catalog order.
+
+    Every slot keeps its value except one, which walks its whole family: a
+    step that changes exactly one fact of the input, so whatever the graph
+    does differently is attributable to that fact. A slot without a value is
+    one the seed did not fix, and takes the catalog's first value — the
+    catalog lists a slot's seed value first, so the seed itself expands into
+    its own neighbourhood.
+    """
+    base = {name: values.get(name, family[0])
+            for name, family in families.items()}
+    children = [dict(base)]
+    for name, family in families.items():
+        for value in family:
+            if value != base[name]:
+                children.append({**base, name: value})
+    return children
+
+
 def cmd_direct(args, targets: list[dict]) -> int:
     d8 = require_d8(Path(args.d8) if args.d8 else default_d8())
     target = find_target(targets, args.target)
     spec = target.get("directed")
     if not spec:
         raise SystemExit(f"target {target['id']} has no 'directed' section")
+    if args.strategy == "best-first" and "distance" not in spec:
+        raise SystemExit(f"target {target['id']} has no 'directed.distance'; "
+                         "best-first needs it to order the queue")
     template = (HERE / spec["template"]).read_text()
     fixed = dict(spec.get("fixed") or {})
     rng = random.Random(args.random_seed)
-    combos = slot_combinations(spec, rng, args.iterations)
+    families = slot_families(spec)
+    combos = (slot_combinations(spec, rng, args.iterations)
+              if args.strategy == "random" else [])
 
     outdir = Path(args.out) / target["id"]
     outdir.mkdir(parents=True, exist_ok=True)
@@ -916,48 +954,49 @@ def cmd_direct(args, targets: list[dict]) -> int:
 
     stats = collections.Counter()
     log = open(args.log, "a") if args.log else None
-    try:
-        for index, combo in enumerate(combos):
-            values = {**fixed, **combo}
-            source = render_template(template, values)
-            label = " ".join(f"{k}={v}" for k, v in sorted(combo.items()))
-            with tempfile.TemporaryDirectory(prefix="dgf-direct-") as tmp:
-                testcase = Path(tmp) / f"{target['id']}-{index:04d}.js"
-                testcase.write_text(source)
-                trace = run_d8(d8, testcase,
-                               maglev_flags(target, args.extra_flag),
-                               args.timeout)
-                hits = count_hits(target, trace.output)
-                missing = missing_patterns(target, hits)
-                signature = coverage_signature(trace.output)
-                dist = distance(signature, target)
-                stats[f"dist_{dist}"] += 1
-                new_path = signature.digest not in corpus
-                _, baseline, divergence = differential_check(
-                    d8, target, testcase, args.timeout, args.extra_flag)
-                stats["candidates"] += 1
-                stats["hit" if not missing else "miss"] += 1
-                # Candidates print instead of asserting, so a baseline that
-                # fails its own check means the mutant is malformed, not that
-                # the compiler diverged.
-                if baseline.self_check_failed or baseline.crashed:
-                    stats["seed_broken"] += 1
-                    continue
-                if new_path:
-                    stats["new_paths"] += 1
-                    corpus[signature.digest] = {
-                        "slots": values,
-                        "inlines": signature.inlines,
-                        "nodes": len(signature.opcodes),
-                        "hits": hits,
-                        "distance": dist,
-                    }
-                if divergence:
-                    stats["divergences"] += 1
-                if not (new_path or divergence or args.keep_all):
-                    if args.verbose:
-                        print(f"[---] distance={dist}  {label}")
-                    continue
+
+    def evaluate(combo: dict, index: int) -> int:
+        """Renders, runs and reports one candidate; returns its distance."""
+        values = {**fixed, **combo}
+        source = render_template(template, values)
+        label = " ".join(f"{k}={v}" for k, v in sorted(combo.items()))
+        with tempfile.TemporaryDirectory(prefix="dgf-direct-") as tmp:
+            testcase = Path(tmp) / f"{target['id']}-{index:04d}.js"
+            testcase.write_text(source)
+            trace = run_d8(d8, testcase,
+                           maglev_flags(target, args.extra_flag),
+                           args.timeout)
+            hits = count_hits(target, trace.output)
+            missing = missing_patterns(target, hits)
+            signature = coverage_signature(trace.output)
+            dist = distance(signature, target)
+            stats[f"dist_{dist}"] += 1
+            new_path = signature.digest not in corpus
+            _, baseline, divergence = differential_check(
+                d8, target, testcase, args.timeout, args.extra_flag)
+            stats["candidates"] += 1
+            stats["hit" if not missing else "miss"] += 1
+            # Candidates print instead of asserting, so a baseline that
+            # fails its own check means the mutant is malformed, not that
+            # the compiler diverged.
+            if baseline.self_check_failed or baseline.crashed:
+                stats["seed_broken"] += 1
+                return dist
+            if new_path:
+                stats["new_paths"] += 1
+                corpus[signature.digest] = {
+                    "slots": values,
+                    "inlines": signature.inlines,
+                    "nodes": len(signature.opcodes),
+                    "hits": hits,
+                    "distance": dist,
+                }
+            if divergence:
+                stats["divergences"] += 1
+            if not (new_path or divergence or args.keep_all):
+                if args.verbose:
+                    print(f"[---] distance={dist}  {label}")
+            else:
                 # The distance is part of the name, so a sorted directory
                 # listing is the search's best-first order.
                 path = outdir / f"{target['id']}-d{dist:03d}-{index:04d}.js"
@@ -975,26 +1014,62 @@ def cmd_direct(args, targets: list[dict]) -> int:
                              else f"  missing: {', '.join(missing)}"))
                 if divergence:
                     print(f"        {divergence}")
-            if log:
-                log.write(json.dumps({
-                    "target": target["id"],
-                    "slots": values,
-                    "signature": signature.digest,
-                    "distance": dist,
-                    "new_path": new_path,
-                    "missing": missing,
-                    "divergence": divergence,
-                }) + "\n")
-                log.flush()
+        if log:
+            log.write(json.dumps({
+                "target": target["id"],
+                "slots": values,
+                "signature": signature.digest,
+                "distance": dist,
+                "new_path": new_path,
+                "missing": missing,
+                "divergence": divergence,
+            }) + "\n")
+            log.flush()
+        return dist
+
+    try:
+        if args.strategy == "best-first":
+            # The queue holds evaluated candidates keyed on distance, so the
+            # next expansion always continues from the closest graph seen so
+            # far instead of from an arbitrary combination. The seed is the
+            # first entry: its distance comes from the run above, and it has
+            # no slot values until it is expanded.
+            order = itertools.count()  # FIFO tie-break between equal scores
+            queue = [(seed_distance, next(order), {})]
+            seen = {()}  # the seed itself: no slot values, nothing to skip
+            index = 0
+            while queue and stats["expansions"] < args.iterations:
+                dist, _, values = heapq.heappop(queue)
+                stats["expansions"] += 1
+                where = ("seed" if not values else
+                         " ".join(f"{k}={v}"
+                                  for k, v in sorted(values.items())))
+                print(f"[exp ] #{stats['expansions']:02d} distance={dist}"
+                      f"  {where}")
+                if dist == 0:
+                    break
+                for child in single_slot_mutations(values, families):
+                    key = slot_key(child, families)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    index += 1
+                    heapq.heappush(queue, (evaluate(child, index),
+                                            next(order), child))
+        else:
+            for index, combo in enumerate(combos):
+                evaluate(combo, index)
     finally:
         if log:
             log.close()
 
     corpus_file.write_text(json.dumps(corpus, indent=1, sort_keys=True) + "\n")
-    print(f"\ntarget={target['id']} candidates={stats['candidates']} "
+    print(f"\ntarget={target['id']} strategy={args.strategy} "
+          f"candidates={stats['candidates']} "
           f"hit={stats['hit']} miss={stats['miss']} "
           f"new_paths={stats['new_paths']} "
           f"divergences={stats['divergences']} "
+          f"expansions={stats['expansions']} "
           f"corpus={len(corpus)} ({corpus_file})")
     histogram = sorted((int(key[len("dist_"):]), count)
                        for key, count in stats.items()
@@ -1427,7 +1502,13 @@ def build_parser() -> argparse.ArgumentParser:
                        help="mutate the values that control a proof")
     p.add_argument("--target", required=True)
     p.add_argument("--iterations", type=int, default=20,
-                   help="slot combinations to try (all of them if fewer)")
+                   help="slot combinations to try (all of them if fewer), or "
+                        "expansions under --strategy=best-first")
+    p.add_argument("--strategy", choices=("random", "best-first"),
+                   default="random",
+                   help="candidate order: 'random' samples slot "
+                        "combinations, 'best-first' expands the candidate "
+                        "closest to the elision (needs directed.distance)")
     p.add_argument("--random-seed", type=int, default=None)
     p.add_argument("--out", default=str(HERE / "mutants"),
                    help="directory for new-path and diverging candidates")
