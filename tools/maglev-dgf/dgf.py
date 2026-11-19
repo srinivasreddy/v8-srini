@@ -956,7 +956,9 @@ def assert_types_result(d8: Path, target: dict, testcase: Path, timeout: float,
 
 def fires(result: D8Result) -> bool:
     """True when a detector observed a violation, not merely a bad exit."""
-    return (result.crashed or result.returncode != 0 or
+    if result.timed_out:
+        return False
+    return (result.crashed or result.returncode > 0 or
             ASSERT_TYPE_MARKER in result.output)
 
 
