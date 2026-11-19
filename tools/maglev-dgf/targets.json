@@ -122,6 +122,59 @@
       "oracle": ["crash", "differential", "verifier"]
     },
     {
+      "id": "backedge-type",
+      "subsystem": "representation-selector",
+      "phase": "PhiUntagging",
+      "sources": [
+        "src/maglev/maglev-interpreter-frame-state.cc:MergeLoopValue",
+        "src/maglev/maglev-ir.h:promote_post_loop_type",
+        "src/maglev/maglev-phi-representation-selector.cc:ConvertTaggedPhiTo"
+      ],
+      "config_flags": ["--maglev-non-eager-inlining"],
+      "trace_flags": [
+        "--print-maglev-graph",
+        "--trace-maglev-phi-untagging"
+      ],
+      "required_patterns": ["Phi", "UnsafeSmiUntag"],
+      "seed": "seeds/12_backedge_type.js",
+      "directed": {
+        "template": "templates/backedge_type.tmpl.js",
+        "slots": {
+          "HEADER_INIT": [
+            "0",
+            "1",
+            "2"
+          ],
+          "BACKEDGE_VALUE": [
+            "1.5",
+            "2.5",
+            "0.5",
+            "100.0"
+          ],
+          "BACKEDGE_POS": [
+            "n-1",
+            "n-2",
+            "n>>1"
+          ]
+        },
+        "fixed": {
+          "N": "20"
+        }
+      },
+      "trigger": [
+        "loop header Phi is Smi; backedge merges a HeapNumber",
+        "on the last iteration; the header type is used without",
+        "re-checking the backedge; the Phi is untagged as Float64",
+        "and the post-loop retag is wrong"
+      ],
+      "bug_classes": [
+        "backedge type not re-validated",
+        "promote_post_loop_type rewrites Phi type with stale union",
+        "UnsafeSmiUntag on a HeapNumber backedge"
+      ],
+      "oracle": ["differential", "assert-types", "crash"]
+    },
+    {
       "id": "inlining",
       "subsystem": "inlining",
       "phase": "MaglevGraphBuilding",
