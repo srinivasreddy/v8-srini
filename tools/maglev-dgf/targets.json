@@ -415,6 +415,58 @@
       "oracle": ["differential", "crash", "verifier"]
     },
     {
+      "id": "inlined-smi-proof",
+      "subsystem": "inlining",
+      "phase": "Inlining",
+      "sources": [
+        "src/maglev/maglev-inlining.cc:ReturnedValueRepresentationSelector",
+        "src/maglev/maglev-inlining.cc:BuildInlineFunction",
+        "src/maglev/maglev-reducer-inl.h:BuildCheckSmi",
+        "src/maglev/maglev-reducer-inl.h:BuildSmiUntag"
+      ],
+      "config_flags": ["--maglev-non-eager-inlining"],
+      "trace_flags": [
+        "--trace-maglev-inlining",
+        "--print-maglev-graph"
+      ],
+      "required_patterns": ["INLINE", "CheckedSmiUntag"],
+      "seed": "seeds/13_inlined_smi_proof.js",
+      "directed": {
+        "template": "templates/inlined_smi_proof.tmpl.js",
+        "slots": {
+          "WARMUP_ARG": [
+            "1",
+            "2",
+            "100"
+          ],
+          "TRIGGER_ARG": [
+            "1.5",
+            "2.5",
+            "5.0",
+            "0.5"
+          ],
+          "CALLEE_OP": [
+            "(x + 1) | 0",
+            "x | 0",
+            "x << 1"
+          ]
+        },
+        "fixed": {}
+      },
+      "trigger": [
+        "callee has a CheckedSmiUntag whose Smi proof is local to the",
+        "callee's call site; the caller is warmed with Smi, then called",
+        "with a HeapNumber; the inliner replaces the CheckedSmiUntag",
+        "without re-checking the caller's argument type"
+      ],
+      "bug_classes": [
+        "CheckedSmiUntag replaced after inlining",
+        "Smi proof does not survive inlining",
+        "write barrier elided on a false Smi proof"
+      ],
+      "oracle": ["differential", "assert-types", "crash"]
+    },
+    {
       "id": "generic-differential",
       "subsystem": "any",
       "phase": "any",
