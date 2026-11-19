@@ -660,6 +660,212 @@ def op_smi_dot_zero(src: str, rng: random.Random, ctx: dict) -> str | None:
     return "".join(lines)
 
 
+# An integer literal is a run of digits that is not glued to an identifier,
+# another number, or the fractional part of a float: `5` in `x + 5` yes,
+# `5` in `x5`, `0x5`, `1.5` and `1e5` no. The lookbehind also skips a digit
+# right after `.`, which is a property access or a float's fraction.
+INT_LITERAL_RE = re.compile(r"(?<![\w.])\d+(?![\w.])")
+# A `[` that follows a value opens a subscript; one that follows a keyword
+# or an operator opens an array literal whose elements are values.
+_VALUE_BEFORE_BRACKET = re.compile(r"(?:[\w$)\]]|['\"`])\s*$")
+_KEYWORD_BEFORE_BRACKET = re.compile(r"(?:return|typeof|in|of|case|new|void|"
+                                    r"delete|yield|await)\s*$")
+
+
+def _is_subscript(src: str, open_idx: int) -> bool:
+    """True when `src[open_idx]` indexes a value instead of opening a literal.
+
+    `a[0]` and `f()[0]` are subscripts, where the number is a key; `= [0]`
+    and `return [0]` are array literals, where it is a value.
+    """
+    head = src[:open_idx]
+    if _VALUE_BEFORE_BRACKET.search(head) is None:
+        return False
+    return _KEYWORD_BEFORE_BRACKET.search(head) is None
+
+
+def _literal_skip_spans(src: str) -> list[tuple[int, int]]:
+    """Regions whose digits are not arithmetic: strings, comments, subscripts.
+
+    A digit inside a string is text (`'smi 5'`) and a digit inside `[...]`
+    is an index, so rewriting either changes no value the compiler sees.
+    """
+    spans: list[tuple[int, int]] = []
+    i = 0
+    while i < len(src):
+        ch = src[i]
+        if ch in "'\"`":
+            end = i + 1
+            while end < len(src) and src[end] != ch:
+                end += 2 if src[end] == "\\" else 1
+            spans.append((i, end + 1))
+            i = end + 1
+        elif src.startswith("//", i):
+            end = src.find("\n", i)
+            end = len(src) if end < 0 else end
+            spans.append((i, end))
+            i = end
+        elif src.startswith("/*", i):
+            end = src.find("*/", i + 2)
+            end = len(src) if end < 0 else end + 2
+            spans.append((i, end))
+            i = end
+        elif ch == "[" and _is_subscript(src, i):
+            end = _find_matching_paren(src, i)
+            if end < 0:
+                break
+            spans.append((i, end + 1))
+            i = end + 1
+        else:
+            i += 1
+    return spans
+
+
+def op_smi_to_heapnumber(src: str, rng: random.Random,
+                          ctx: dict) -> str | None:
+    """`7` -> `7.0`: the same number, held as a HeapNumber, not as a Smi.
+
+    The digits are untouched and `5.0 === 5`, so every expectation in the
+    seed still holds and a divergence cannot be blamed on the input's value:
+    what moves is the representation the compiler records for it. That is the
+    input a value-equal proof needs to go stale, i.e. a store of a
+    value-equal HeapNumber where the feedback says Smi. `-0` becomes `-0.0`,
+    so the sign, and with it `1 / x === -Infinity`, survives the rewrite.
+    """
+    skip = _literal_skip_spans(src)
+
+    def in_span(match: re.Match) -> bool:
+        return any(start <= match.start() < end for start, end in skip)
+
+    def in_exponent(match: re.Match) -> bool:
+        # `1e-3`: the `3` sits after an exponent sign, and `1e-3.0` is not
+        # a number.
+        start = match.start()
+        return (start >= 3 and src[start - 1] in "+-" and
+                src[start - 2] in "eE" and src[start - 3].isdigit())
+
+    candidates = [m for m in INT_LITERAL_RE.finditer(src)
+                  if not in_span(m) and not in_exponent(m)]
+    if not candidates:
+        return None
+    match = rng.choice(candidates)
+    return src[:match.end()] + ".0" + src[match.end():]
+
+
+FLOAT64_LITERALS = ("1.5", "2.5", "0.5")
+
+
+def _top_level_after(text: str, start: int, stop: str) -> int:
+    """Index of the first `stop` character at bracket depth 0, or -1.
+
+    A `;` inside an array literal or a string does not end the statement, so
+    the scan tracks brackets and quotes the way the call-site helpers do.
+    """
+    depth = 0
+    quote = None
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 1
+            elif ch == quote:
+                quote = None
+        elif ch in "'\"`":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return -1
+            depth -= 1
+        elif depth == 0 and ch == stop:
+            return i
+        i += 1
+    return -1
+
+
+def _counting_loops(src: str) -> list[tuple[str, str, int, int]]:
+    """Counting `for` loops as (index, last test, body start, body end).
+
+    The header must be `init; i < bound; step`, so the body's last iteration
+    is known: `i === bound - 1` for `<`, `i === bound` for `<=`. Only a body
+    written as a block `{...}` has a span a rewrite can stay inside.
+    """
+    loops = []
+    for m in re.finditer(r"\bfor\s*\(", src):
+        open_idx = m.end() - 1
+        close_idx = _find_matching_paren(src, open_idx)
+        if close_idx < 0:
+            continue
+        parts = src[open_idx + 1:close_idx].split(";")
+        if len(parts) != 3:
+            continue
+        init = re.match(r"\s*(?:let|var|const)?\s*(\w+)\s*=", parts[0])
+        test = re.match(r"\s*(\w+)\s*(<=?)\s*(.+?)\s*$", parts[1])
+        if not init or not test or test.group(1) != init.group(1):
+            continue
+        bound = test.group(3)
+        last = f"{bound} - 1" if test.group(2) == "<" else bound
+        body = close_idx + 1
+        while body < len(src) and src[body].isspace():
+            body += 1
+        if body >= len(src) or src[body] != "{":
+            continue
+        body_end = _find_matching_paren(src, body)
+        if body_end < 0:
+            continue
+        loops.append((init.group(1), last, body + 1, body_end))
+    return loops
+
+
+def op_backedge_rep_change(src: str, rng: random.Random,
+                           ctx: dict) -> str | None:
+    """`x = x + o.v` -> `x = (i === n - 1) ? 1.5 : (x + o.v)`.
+
+    The header keeps its Smi while the value travelling the back edge is a
+    HeapNumber on the selected iterations, so the header Phi has to merge two
+    representations. A loop that keeps one representation stays Int32Add —
+    the seed's `100.0` is integral, so Maglev materialises it as an
+    Int32Constant — while this is the shape that ends up as Float64Add on
+    the back edge (src/maglev/maglev-interpreter-frame-state.cc:
+    MergeLoopValue, maglev-phi-representation-selector.cc:ConvertTaggedPhiTo).
+    Only a loop-carried `let`/`var` assignment is rewritten, so the variable
+    keeps living across iterations.
+    """
+    assignments = []
+    for index, last, body, body_end in _counting_loops(src):
+        for m in re.finditer(r"(?<![\w.$])(\w+)\s*=(?![=>])",
+                             src[body:body_end]):
+            name = m.group(1)
+            declared = rf"\b(?:let|var)\s+{re.escape(name)}\b"
+            if not re.search(declared, src[:body + m.end()]):
+                continue
+            expr_start = body + m.end()
+            expr_end = _top_level_after(src, expr_start, ";")
+            if expr_end < 0 or expr_end > body_end:
+                continue
+            raw = src[expr_start:expr_end]
+            lead = len(raw) - len(raw.lstrip())
+            trail = len(raw) - len(raw.rstrip())
+            assignments.append((index, last, expr_start + lead,
+                                expr_end - trail,
+                                src[expr_start + lead:expr_end - trail]))
+    if not assignments:
+        return None
+    var, last, start, end, expr = rng.choice(assignments)
+    # `(i & 1)` alternates, so the Phi merges both representations on every
+    # iteration and the in-loop add becomes Float64Add; `i === n - 1` lets
+    # the selector peel the last iteration instead, which keeps the loop
+    # itself in Int32, so the alternating form is the one to prefer.
+    if rng.random() < 0.75:
+        condition = f"({var} & 1)"
+    else:
+        condition = f"({var} === {last})"
+    literal = rng.choice(FLOAT64_LITERALS)
+    return src[:start] + f"{condition} ? {literal} : ({expr})" + src[end:]
+
+
 def op_loop_bound_or(src: str, rng: random.Random, ctx: dict) -> str | None:
     """`i < n` -> `i < (n | 0)`: keeps the bound, exercises range analysis."""
     pattern = re.compile(r"(for\s*\([^;]*;\s*\w+\s*<\s*)([A-Za-z_]\w*)")
@@ -713,7 +919,9 @@ OPS = [
     ("call-duplicate", op_call_duplicate),
     ("redundant-truncation", op_redundant_truncation),
     ("smi-dot-zero", op_smi_dot_zero),
+    ("smi-to-heapnumber", op_smi_to_heapnumber),
     ("loop-bound-or", op_loop_bound_or),
+    ("backedge-rep-change", op_backedge_rep_change),
     ("void-dead", op_void_dead),
     ("extra-property", op_extra_property),
 ]

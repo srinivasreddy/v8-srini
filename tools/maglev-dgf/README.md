@@ -115,8 +115,9 @@ done
 
 ## Mutators
 
-The mutators are structure mutations that keep the seed's arithmetic intact, so
-the seed's self-check still holds and any output difference is a compiler bug:
+The mutators are structure and representation mutations that keep the seed's
+arithmetic intact, so the seed's self-check still holds and any output
+difference is a compiler bug:
 
 | Mutator | Mutation | What it perturbs |
 | ------- | -------- | ---------------- |
@@ -125,7 +126,9 @@ the seed's self-check still holds and any output difference is a compiler bug:
 | `call-duplicate` | `f(a);` -> `f(a); void f(a);` | a second call site: polymorphic feedback, call frequency |
 | `redundant-truncation` | `x \| 0` -> `x \| 0 \| 0` | the truncation pass, value unchanged |
 | `smi-dot-zero` | `1000` -> `1000.0` | literal kind / representation hint |
+| `smi-to-heapnumber` | `7` -> `7.0` | a value's representation: the same number as a HeapNumber, not a Smi (targets `value-equal-smi`; strings, comments and `a[0]` indices are skipped) |
 | `loop-bound-or` | `i < n` -> `i < (n \| 0)` | range analysis of the loop bound |
+| `backedge-rep-change` | `x = x + o.v;` -> `x = (i === n - 1) ? 1.5 : (x + o.v);` | the representation a loop back edge carries: the header keeps its Smi while the merged value is a HeapNumber on the last (or every other) iteration, so the Phi has two representations to merge (targets `backedge-type`) |
 | `void-dead` | adds `void x;` | liveness, an extra node with no side effect |
 | `extra-property` | `{a: 1}` -> `{a: 1, __dgf: 0}` | map/field layout (skipped for `for-in` seeds) |
 

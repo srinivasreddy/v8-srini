@@ -15,6 +15,7 @@
       "patch": "canary/value-equal-check.patch",
       "channel": "proof elision (BuildCheckSmi, value-equal)",
       "summary": "BuildCheckSmi elides when CheckFloat64SameValue(node, IntegerSmi) holds, even if node is a HeapNumber.",
+      "mutator": "smi-to-heapnumber (`7` -> `7.0`, value equal, representation not) is the mutation aimed at this fault and at the `value-equal-smi` target specifically: it moves exactly the fact this proof reads, from Smi to HeapNumber, without moving any value the seed's self-check compares. C1.1 (500880819, 489280531) is this shape.",
       "expects": "a store of a value-equal HeapNumber into a Smi-typed field diverges in the maglev config: `seeds/14_value_equal_smi.js` and the `-0.0` slot of the template read the field back as +0 after the store (differential, field reads `Infinity` instead of `-Infinity`). The store has to be observed through the field: Maglev forwards the stored node to a load of the same field in the same function, so the store's return value hides it. A value-equal HeapNumber that keeps its value (5.0, 0.0, a HeapNumber holding an integer) does not diverge, and 7 / 1e3 never reach the fault because they are already Smis. Clean builds do not diverge on this seed, so verdicts are canary-only.",
       "validated": true
     },
