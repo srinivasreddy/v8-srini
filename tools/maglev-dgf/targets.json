@@ -467,6 +467,57 @@
       "oracle": ["differential", "assert-types", "crash"]
     },
     {
+      "id": "value-equal-smi",
+      "subsystem": "reducer",
+      "phase": "GraphBuilding",
+      "sources": [
+        "src/maglev/maglev-reducer-inl.h:BuildCheckSmi",
+        "src/maglev/maglev-reducer-inl.h:BuildSmiUntag",
+        "src/maglev/maglev-graph-builder.cc:BuildStoreField"
+      ],
+      "config_flags": [],
+      "trace_flags": ["--print-maglev-graph"],
+      "required_patterns": ["CheckSmi", "StoreTaggedFieldNoWriteBarrier"],
+      "seed": "seeds/14_value_equal_smi.js",
+      "directed": {
+        "template": "templates/value_equal_smi.tmpl.js",
+        "slots": {
+          "WARMUP_VAL": [
+            "1",
+            "2",
+            "100"
+          ],
+          "TRIGGER_VAL": [
+            "5.0",
+            "-0.0",
+            "0.0",
+            "100.0",
+            "1e0"
+          ],
+          "FIELD_REPR": [
+            "smi"
+          ],
+          "GC_POSITION": [
+            "after",
+            "before-and-after"
+          ]
+        },
+        "fixed": {}
+      },
+      "trigger": [
+        "object field is Smi-typed from warmup; a HeapNumber whose",
+        "value equals a Smi (5.0 vs 5, -0.0 vs 0) is stored; the",
+        "check that should reject it is elided; the store omits the",
+        "write barrier; a subsequent GC observes the wrong repr"
+      ],
+      "bug_classes": [
+        "value equality treated as representation equality",
+        "BuildCheckSmi elided on CheckFloat64SameValue",
+        "write barrier elided on a HeapNumber store"
+      ],
+      "oracle": ["differential", "assert-types", "crash", "gc"]
+    },
+    {
       "id": "generic-differential",
       "subsystem": "any",
       "phase": "any",
