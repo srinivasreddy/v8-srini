@@ -12,7 +12,7 @@ It consists of these parts:
 | -------------- | ---- |
 | `targets.json` | Catalog: subsystem, C++ entry points, the d8 trace configuration that proves reachability, the seed that reaches it, and (optionally) the directed-mutation slots of that seed. |
 | `seeds/*.js`   | Hand-written, self-checking inputs. They assert only that Maglev was used (guarded `%ActiveTierIsMaglev`) and that their expected values are right. |
-| `dgf.py`       | Driver: `targets` (list), `check` (reachability + differential), `fuzz` (target-aware mutation), `direct` (value-directed mutation), `minimize` (shrink a divergent candidate), `verify` (deterministic verification), `canary` (injected-fault build). |
+| `dgf.py`       | Driver: `targets` (list), `check` (reachability + differential), `fuzz` (target-aware mutation), `direct` (value-directed mutation), `bench` (directed vs random-mutation baseline), `minimize` (shrink a divergent candidate), `verify` (deterministic verification), `canary` (injected-fault build). |
 | `templates/*.tmpl.js` | Slot templates for `direct`: the same shape as a seed, with the facts that control a representation proof left as `{{SLOT}}` markers. |
 | `canary/*.patch` | Injected faults for `verify`'s positive control: one proof taken on faith, applied to the source and built into a separate d8. |
 
@@ -87,6 +87,10 @@ python3 tools/maglev-dgf/dgf.py fuzz --target osr-entry --iterations 50 \
 # "directed" section in the catalog entry).
 python3 tools/maglev-dgf/dgf.py direct --target kna-replay-elision \
     --iterations 20 --random-seed 1 -v
+
+# Measure that against random mutation on the same budget.
+python3 tools/maglev-dgf/dgf.py bench --target phi-heapobjectness \
+    --iterations 20 --random-seed 1
 
 # Shrink a saved candidate while the differential still fires.
 python3 tools/maglev-dgf/dgf.py minimize \
@@ -179,6 +183,63 @@ graph still has (`want_present`). The score prefixes the saved file name
 (`phi-heapobjectness-d002-0003.js`), so a sorted listing of
 `mutants/<target>/` is the search's best-first order, and the summary prints
 the distance histogram next to the seed's own distance.
+
+## Baseline comparison (`bench`)
+
+`direct`'s claim is comparative: the slot combinations reach paths that
+mutating the seed's structure would not. `bench` measures it, spending the
+same number of candidates on both arms of the same catalog entry:
+
+```bash
+python3 tools/maglev-dgf/dgf.py bench --target phi-heapobjectness \
+    --iterations 20 --random-seed 1
+```
+
+The baseline is `generic-differential`: the same seed, mutated by the
+mutators `fuzz` uses (up to `--max-mutations`, default 2), with no slots and
+no reachability requirement. Both arms are compiled and scored by the same
+function (`bench_arm`) — the graph-dump signature, the catalog's
+`directed.distance`, and the differential — so the four numbers mean the
+same thing on each side:
+
+| Metric | Meaning |
+| ------ | ------- |
+| `new signatures` | candidates whose signature is neither the seed's nor an earlier candidate's *of the same arm* |
+| `distance < seed` | candidates closer to the elision than the seed's own graph |
+| `divergences` | candidates where the Maglev and baseline runs disagree |
+| `seed_broken` | candidates whose baseline run failed the seed's own self-check, so the expected value moved (lower is better) |
+
+Each arm draws from its own RNG stream, so neither arm's candidates depend on
+how many draws the other made, and `--random-seed` repeats a whole
+comparison. Nothing is written to disk: `bench` is a measurement, not a
+search, so `--out`, the corpus and `minimize` take no part in it. `--json`
+prints the same numbers as one object for a campaign log. When the catalog has
+fewer slot combinations than `--iterations`, `direct` runs out of them before
+the baseline runs out of mutants; the header reports both candidate counts.
+
+On `phi-heapobjectness` the distance metric is where the directed slots pay
+off — the graph shape barely moves between value combinations, but random
+structural mutation leaves the seed's `CheckSmi` in place:
+
+```
+bench: target=phi-heapobjectness iterations=20 seed=11_phi_heapobjectness.js seed_distance=12 random_seed=1
+       baseline=generic-differential candidates: direct=20 generic-differential=20
+
+  metric                 direct generic-differential    better
+  new signatures              2                    1    direct
+  distance < seed            20                    0    direct
+  divergences                 0                    0         -
+  seed_broken                 0                    0         -
+
+outcome: direct  (better on new_paths, improved)
+        distance: 20 vs 0 improving candidates
+```
+
+The exit code is the verdict: 1 when the baseline wins (`direct` better on no
+metric, worse on some), 0 when `direct` wins, and 0 with a warning when the
+arms tie. A tie means the budget did not separate them — not that the slots
+are inert — so raise `--iterations`; a `direct` win that did not come from
+the distance metric is warned about as well.
 
 ## Minimization (`minimize`)
 
@@ -335,6 +396,11 @@ python3 tools/clusterfuzz/foozzie/v8_foozzie.py \
   shape; a mutator that cannot apply returns `None` instead of guessing.
 * `direct` needs a `directed` section in the catalog and a template whose
   slots are the values under study; it does not derive either from a seed.
+* `bench` compares one seed at one budget: it measures whether the catalog's
+  slots beat structural mutation *on that template*, and a tie means the
+  budget was too small, not that the directed search is inert. The baseline
+  is a structural mutator, so a divergence it finds is a real finding too —
+  the four numbers are a comparison, not a filter.
 * `minimize` is greedy and value-directed, not a reducer: it moves the
   template's slots and drops comment-only lines, it does not delete
   statements, and a step it rejected is never retried. A candidate that

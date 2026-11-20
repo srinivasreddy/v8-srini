@@ -25,6 +25,9 @@ Subcommands:
   direct --target ID      mutate only the values that control a representation
                           proof, and keep the mutants that reach a new
                           optimization path (coverage from the graph dump)
+  bench --target ID       run `direct`'s slot combinations and a random
+                          mutation baseline (`generic-differential`) on the
+                          same budget, and print which arm found more
   minimize FILE --target ID
                           shrink a diverging candidate while the differential
                           still fires: slot values back to the seed's default,
@@ -1872,6 +1875,252 @@ def cmd_canary(args, targets: list[dict]) -> int:
 
 
 # --------------------------------------------------------------------------
+# Phase 5: baseline comparison
+#
+# `direct` and `fuzz` both report what they found, but neither says what the
+# other would have found on the same budget, so "the directed slots find paths
+# that random mutation misses" stays a claim. `bench` spends the same number
+# of candidates on the target's slot combinations and on structural mutants of
+# the same seed (the `generic-differential` arm: no slots, no reachability
+# requirement, the mutators `fuzz` uses), scores both with the same function,
+# and prints the numbers side by side.
+#
+# The arms start from the same empty corpus -- the seed's own signature -- so
+# neither is credited for a path the other would have found too, and both are
+# scored with the target's `directed.distance`. `bench` writes no files:
+# `direct` and `fuzz` are the commands that save findings, and a measurement
+# that left candidates behind would be a search.
+# --------------------------------------------------------------------------
+
+# Metric, column label, and whether a lower value is the better one.
+BENCH_METRICS = (
+    ("new_paths", "new signatures", False),
+    ("improved", "distance < seed", False),
+    ("divergences", "divergences", False),
+    ("seed_broken", "seed_broken", True),
+)
+
+
+@dataclasses.dataclass
+class BenchArm:
+    """One search arm's numbers, all counted by bench_arm()."""
+    name: str
+    candidates: int = 0
+    new_paths: int = 0
+    improved: int = 0
+    divergences: int = 0
+    seed_broken: int = 0
+
+    def to_json(self) -> dict:
+        return {
+            "candidates": self.candidates,
+            **{key: getattr(self, key) for key, _, _ in BENCH_METRICS},
+        }
+
+
+def bench_arm(name: str, target: dict, d8: Path, timeout: float,
+              sources: Iterable[str], seed_digest: str, seed_distance: int,
+              extra_flags: Sequence[str] = (),
+              verbose: bool = False) -> BenchArm:
+    """Compiles every candidate of one arm and tallies what it found.
+
+    A candidate is a *new signature* when its graph signature is neither the
+    seed's nor one an earlier candidate of the same arm printed, so the arms
+    are measured against the same starting corpus. It is *improving* when its
+    distance is below the seed's, and *seed-broken* when its baseline run
+    fails the seed's own self-check: the expected value moved, not the
+    compiler, exactly as `fuzz` and `direct` decide it.
+    """
+    arm = BenchArm(name=name)
+    seen = {seed_digest}
+    for index, source in enumerate(sources):
+        with tempfile.TemporaryDirectory(prefix="dgf-bench-") as tmp:
+            testcase = Path(tmp) / f"{target['id']}-{index:04d}.js"
+            testcase.write_text(source)
+            trace = run_d8(d8, testcase,
+                           maglev_flags(target, extra_flags), timeout)
+            signature = coverage_signature(trace.output)
+            dist = distance(signature, target)
+            _, baseline, divergence = differential_check(
+                d8, target, testcase, timeout, extra_flags)
+        arm.candidates += 1
+        # Same order as `direct`: a candidate whose baseline run moved the
+        # expected value says nothing about the target's graph.
+        if baseline.self_check_failed or baseline.crashed:
+            arm.seed_broken += 1
+            if verbose:
+                print(f"[{name}] #{index:02d} distance={dist} seed_broken")
+            continue
+        new_path = signature.digest not in seen
+        if new_path:
+            seen.add(signature.digest)
+            arm.new_paths += 1
+        improved = dist < seed_distance
+        if improved:
+            arm.improved += 1
+        if divergence:
+            arm.divergences += 1
+        if verbose:
+            print(f"[{name}] #{index:02d} distance={dist} "
+                  f"new={int(new_path)} improved={int(improved)}" +
+                  (f"  {divergence}" if divergence else ""))
+    return arm
+
+
+def bench_mutants(base: str, rng: random.Random, iterations: int,
+                  max_mutations: int) -> list[str]:
+    """`iterations` structural mutants, drawn the way `fuzz` draws them.
+
+    `fuzz` skips a try whose mutators all declined; the baseline arm draws
+    again instead, so that both arms get the same candidate budget, and gives
+    up after a bounded number of draws on a seed nothing can mutate.
+    """
+    mutants: list[str] = []
+    for _ in range(iterations):
+        for _attempt in range(10):
+            num_ops = rng.randint(1, max(1, max_mutations))
+            source, applied = mutate_source(base, rng, num_ops)
+            if applied:
+                mutants.append(source)
+                break
+    return mutants
+
+
+def bench_comparison(direct: BenchArm, baseline: BenchArm
+                     ) -> list[tuple[str, str, int, int, str]]:
+    """(metric, label, direct, baseline, better) for every metric."""
+    rows = []
+    for key, label, lower_is_better in BENCH_METRICS:
+        mine, theirs = getattr(direct, key), getattr(baseline, key)
+        if mine == theirs:
+            better = "-"
+        elif (mine < theirs) == lower_is_better:
+            better = direct.name
+        else:
+            better = baseline.name
+        rows.append((key, label, mine, theirs, better))
+    return rows
+
+
+def bench_outcome(rows: list[tuple[str, str, int, int, str]],
+                  direct: BenchArm,
+                  baseline: BenchArm) -> tuple[str, list[str], list[str]]:
+    """(outcome, metrics `direct` won, metrics the baseline won).
+
+    `bench` exits non-zero only when the baseline wins outright, so the
+    verdict is one word: `direct`, `baseline`, `mixed` (each arm won
+    something) or `tie` (nothing separated them).
+    """
+    wins = [key for key, _, _, _, better in rows if better == direct.name]
+    losses = [key for key, _, _, _, better in rows if better == baseline.name]
+    if wins and not losses:
+        outcome = "direct"
+    elif losses and not wins:
+        outcome = "baseline"
+    elif wins:
+        outcome = "mixed"
+    else:
+        outcome = "tie"
+    return outcome, wins, losses
+
+
+def cmd_bench(args, targets: list[dict]) -> int:
+    d8 = require_d8(Path(args.d8) if args.d8 else default_d8())
+    target = find_target(targets, args.target)
+    spec = target.get("directed")
+    if not spec:
+        raise SystemExit(f"target {target['id']} has no 'directed' section; "
+                         "there is nothing directed to compare")
+    if "distance" not in spec:
+        raise SystemExit(f"target {target['id']} has no 'directed.distance'; "
+                         "every candidate is scored with it")
+    template = (HERE / spec["template"]).read_text()
+    fixed = dict(spec.get("fixed") or {})
+    seed = seed_path(target)
+    base = seed.read_text()
+    seed_trace = run_d8(d8, seed, maglev_flags(target, args.extra_flag),
+                        args.timeout)
+    seed_signature = coverage_signature(seed_trace.output)
+    seed_distance = distance(seed_signature, target)
+
+    # One stream per arm, so neither arm's draws depend on how many the other
+    # consumed, and the same --random-seed repeats the whole comparison.
+    direct_rng = random.Random(f"direct:{args.random_seed}")
+    baseline_rng = random.Random(f"baseline:{args.random_seed}")
+    values = [{**fixed, **combo}
+              for combo in slot_combinations(spec, direct_rng,
+                                              args.iterations)]
+    direct_sources = [
+        candidate_header(target, value) + render_template(template, value)
+        for value in values
+    ]
+    # The baseline sees the same seed with the slots left alone.
+    baseline_sources = bench_mutants(base, baseline_rng, args.iterations,
+                                     args.max_mutations)
+
+    direct = bench_arm("direct", target, d8, args.timeout, direct_sources,
+                       seed_signature.digest, seed_distance, args.extra_flag,
+                       args.verbose)
+    baseline = bench_arm(args.baseline, target, d8, args.timeout,
+                         baseline_sources, seed_signature.digest,
+                         seed_distance, args.extra_flag, args.verbose)
+    rows = bench_comparison(direct, baseline)
+    outcome, wins, losses = bench_outcome(rows, direct, baseline)
+    record = {
+        "target": target["id"],
+        "seed": seed.name,
+        "seed_distance": seed_distance,
+        "iterations": args.iterations,
+        "random_seed": args.random_seed,
+        "baseline": baseline.name,
+        "arms": {
+            direct.name: direct.to_json(),
+            baseline.name: baseline.to_json(),
+        },
+        "better_on": wins,
+        "worse_on": losses,
+        "outcome": outcome,
+    }
+    if args.json:
+        print(json.dumps(record, indent=1, sort_keys=True))
+        return 1 if outcome == "baseline" else 0
+
+    print(f"bench: target={target['id']} iterations={args.iterations} "
+          f"seed={seed.name} seed_distance={seed_distance} "
+          f"random_seed={args.random_seed}")
+    print(f"       baseline={baseline.name} candidates: "
+          f"direct={direct.candidates} {baseline.name}={baseline.candidates}")
+    if direct.candidates != baseline.candidates:
+        print(f"       note: the arms ran different candidate counts "
+              f"({direct.name}={direct.candidates}, "
+              f"{baseline.name}={baseline.candidates})")
+    print()
+    print(f"  {'metric':<20}{direct.name:>9}{baseline.name:>21}"
+          f"{'better':>10}")
+    for _, label, mine, theirs, better in rows:
+        print(f"  {label:<20}{mine:>9}{theirs:>21}{better:>10}")
+    if outcome == "direct":
+        print(f"\noutcome: direct  (better on {', '.join(wins)})")
+    elif outcome == "mixed":
+        print(f"\noutcome: mixed  (direct better on {', '.join(wins)}; "
+              f"baseline better on {', '.join(losses)})")
+    elif outcome == "tie":
+        print("\noutcome: tie  (every metric equal)")
+        print("        warning: this budget does not separate the arms; "
+              "raise --iterations")
+    else:
+        print(f"\noutcome: baseline  (better on {', '.join(losses)})")
+    if direct.improved > baseline.improved:
+        print(f"        distance: {direct.improved} vs {baseline.improved} "
+              "improving candidates")
+    else:
+        print(f"        warning: direct did not produce more "
+              f"distance-improving candidates "
+              f"({direct.improved} vs {baseline.improved})")
+    return 1 if outcome == "baseline" else 0
+
+
+# --------------------------------------------------------------------------
 # Commands
 # --------------------------------------------------------------------------
 
@@ -2086,6 +2335,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--extra-flag", action="append", default=[],
                    help="extra d8 flag, may be repeated")
 
+    p = sub.add_parser("bench", parents=[common],
+                       help="compare `direct` with random mutation on the "
+                            "same budget")
+    p.add_argument("--target", required=True)
+    p.add_argument("--iterations", type=int, default=20,
+                   help="candidates per arm")
+    p.add_argument("--baseline", default="generic-differential",
+                   choices=("generic-differential",),
+                   help="random-mutation arm to compare against: the seed, "
+                        "mutated structurally, with no reachability "
+                        "requirement (default: %(default)s)")
+    p.add_argument("--max-mutations", type=int, default=2,
+                   help="upper bound on mutators per baseline mutant")
+    p.add_argument("--random-seed", type=int, default=None)
+    p.add_argument("--json", action="store_true")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="print every candidate's distance and outcome")
+    p.add_argument("--extra-flag", action="append", default=[],
+                   help="extra d8 flag, may be repeated")
+
     p = sub.add_parser("minimize", parents=[common],
                        help="shrink a diverging candidate while it still "
                             "diverges")
@@ -2131,20 +2400,18 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     targets = load_targets(Path(args.targets))
-    if args.cmd == "targets":
-        return cmd_targets(args, targets)
-    if args.cmd == "check":
-        return cmd_check(args, targets)
-    if args.cmd == "fuzz":
-        return cmd_fuzz(args, targets)
-    if args.cmd == "direct":
-        return cmd_direct(args, targets)
-    if args.cmd == "minimize":
-        return cmd_minimize(args, targets)
-    if args.cmd == "verify":
-        return cmd_verify(args, targets)
-    if args.cmd == "canary":
-        return cmd_canary(args, targets)
+    lookup_table = {
+        "targets": cmd_targets,
+        "check" : cmd_check,
+        "fuzz" : cmd_fuzz,
+        "direct" : cmd_direct,
+        "bench" : cmd_bench,
+        "minimize" : cmd_minimize,
+        "verify" : cmd_verify,
+        "canary" : cmd_canary
+    }
+    if args.cmd in lookup_table:
+        return lookup_table[args.cmd](args, targets)
     raise SystemExit(f"unknown command {args.cmd}")
 
 
