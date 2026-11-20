@@ -250,6 +250,29 @@ def missing_patterns(target: dict, counts: dict[str, int]) -> list[str]:
             if counts.get(p, 0) == 0]
 
 
+def reachability(target: dict, output: str) -> list[str]:
+    """Why the trace does not prove that the target was reached; [] if it does.
+
+    'required_patterns' must all appear. 'hit_patterns' are alternatives of
+    which 'min_hits' have to match in total, so a target whose only evidence
+    is a counted pattern (`Untagging`) is not reached by a trace that never
+    printed it. `check` and `verify` both decide reachability from this list,
+    because a target that is "reached" for one command and not for the other
+    is a bug in the tool, not a finding.
+    """
+    hits = count_hits(target, output)
+    missing = missing_patterns(target, hits)
+    required = required_hits(target)
+    matched = sum(hits.values())
+    if required and matched < required:
+        absent = [p for p in target.get("hit_patterns") or []
+                  if hits.get(p, 0) == 0 and p not in missing]
+        # An alternative that matched, but too few times, has no absent
+        # pattern to name: report the count instead.
+        missing += absent or [f"{required} hits (got {matched})"]
+    return missing
+
+
 def evidence(target: dict, output: str, limit: int = 3) -> list[str]:
     """Returns a few lines that prove the target was reached."""
     found = []
@@ -383,12 +406,11 @@ def check_target(d8: Path, target: dict, timeout: float,
     maglev = run_d8(d8, seed, maglev_flags(target, extra_flags), timeout)
     hits = count_hits(target, maglev.output)
     required = required_hits(target)
-    missing = missing_patterns(target, hits)
+    missing = reachability(target, maglev.output)
     report = TargetReport(
         target_id=target["id"],
         seed=str(seed),
-        hit=not missing and ((sum(hits.values()) >= required) if required
-                             else True),
+        hit=not missing,
         hits=hits,
         required=required,
         evidence=evidence(target, maglev.output),
@@ -1231,7 +1253,7 @@ def cmd_direct(args, targets: list[dict]) -> int:
                            maglev_flags(target, args.extra_flag),
                            args.timeout)
             hits = count_hits(target, trace.output)
-            missing = missing_patterns(target, hits)
+            missing = reachability(target, trace.output)
             signature = coverage_signature(trace.output)
             dist = distance(signature, target)
             stats[f"dist_{dist}"] += 1
@@ -1583,6 +1605,9 @@ class Verdict:
     target_id: str
     testcase: str
     reached: bool
+    # Which witness proved reachability: "trace" (the target's patterns
+    # matched), "crash" (a crash whose report names the target), or "none".
+    reached_by: str
     missing: list[str]
     divergence: str | None
     assert_fires: bool
@@ -1605,28 +1630,73 @@ def classify(reached: bool, clean_fires: bool, canary_fires: bool) -> str:
     return "clean"
 
 
-MAGLEV_CRASH_RE = re.compile(r"maglev", re.I)
+# A token of a `bug_classes` entry that can be used as evidence: a crash
+# report names symbols (`CheckDynamicValue`, `promote_post_loop_type`), not
+# prose ("stale enum cache / CheckDynamicValue deopt loop"). A plain English
+# word would match any crash text, so a token has to look like a symbol --
+# an internal capital or an internal underscore -- to be kept.
+SYMBOL_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
+INTERNAL_CAPITAL_RE = re.compile(r"[A-Z]")
+INTERNAL_UNDERSCORE_RE = re.compile(r"[A-Za-z0-9]_[A-Za-z0-9]")
 
 
-def _crashed_in_maglev(target: dict, result: D8Result) -> bool:
-    """True when a crashed run names Maglev itself, not an unrelated fatal.
+def source_basenames(target: dict) -> list[str]:
+    """`src/maglev/maglev-truncation.cc:MaglevTruncation` -> `maglev-...cc`."""
+    basenames = []
+    for source in target.get("sources") or []:
+        basename = source.split(":", 1)[0].rsplit("/", 1)[-1]
+        if basename and basename not in basenames:
+            basenames.append(basename)
+    return basenames
 
-    A crash is evidence of reachability only if the report points into Maglev:
-    `../../src/maglev/...` in the stack, `MaglevGraphBuilder::...`, and so
-    on. Without that, a candidate that dies in some other subsystem would be
-    counted as having reached the target.
+
+def bug_class_keywords(target: dict) -> list[str]:
+    """The symbols the target's `bug_classes` name, e.g. `ForInNext`."""
+    keywords: list[str] = []
+    for bug_class in target.get("bug_classes") or []:
+        for word in SYMBOL_TOKEN_RE.findall(bug_class):
+            if len(word) < 4 or word in keywords:
+                continue
+            if (INTERNAL_CAPITAL_RE.search(word[1:]) or
+                    INTERNAL_UNDERSCORE_RE.search(word)):
+                keywords.append(word)
+    return keywords
+
+
+def _crash_mentions_target(target: dict, result: D8Result) -> bool:
+    """True when a crash's report names the target, not a bystander.
+
+    A crash is evidence of reachability only if the report points into the
+    code the target is about: one of its source files (the
+    `# Fatal error in ../../src/maglev/...cc` line, or a frame of the stack
+    trace) or one of the symbols its bug classes name. A DCHECK in the graph
+    builder says nothing about whether the input reached phi untagging, even
+    though both are Maglev, and counting it would turn any crash anywhere in
+    Maglev into a "candidate" for every target.
     """
-    return result.crashed and bool(MAGLEV_CRASH_RE.search(result.output))
+    if not result.crashed:
+        return False
+    output = strip_ansi(result.output)
+    if any(name in output for name in source_basenames(target)):
+        return True
+    return any(keyword in output for keyword in bug_class_keywords(target))
 
 
 def verify_candidate(target: dict, d8: Path, canary: Path | None,
                      testcase: Path, timeout: float,
                      extra_flags: Sequence[str] = ()) -> Verdict:
     trace = run_d8(d8, testcase, maglev_flags(target, extra_flags), timeout)
-    hits = count_hits(target, trace.output)
-    missing = missing_patterns(target, hits)
-    # A Maglev crash in the trace run already proves the input reached it.
-    reached = not missing or _crashed_in_maglev(target, trace)
+    missing = reachability(target, trace.output)
+    # Two witnesses of reachability, and both have to be about *this* target:
+    # its trace patterns, or a crash whose report names it. A crash elsewhere
+    # in Maglev reaches nothing.
+    if not missing:
+        reached_by = "trace"
+    elif _crash_mentions_target(target, trace):
+        reached_by = "crash"
+    else:
+        reached_by = "none"
+    reached = reached_by != "none"
     _, _, divergence = differential_check(d8, target, testcase, timeout,
                                           extra_flags)
     assert_fires = fires(
@@ -1646,6 +1716,7 @@ def verify_candidate(target: dict, d8: Path, canary: Path | None,
         target_id=target["id"],
         testcase=str(testcase),
         reached=reached,
+        reached_by=reached_by,
         missing=missing,
         divergence=divergence,
         assert_fires=assert_fires,
@@ -1669,6 +1740,10 @@ def print_verdict(verdict: Verdict, verbose: bool = False) -> None:
     print("        " + " ".join(detectors))
     if verdict.missing:
         print("        missing: " + ", ".join(verdict.missing))
+    if verdict.reached_by == "crash":
+        print("        reached_by: crash (the report names the target)")
+    elif verdict.reached_by == "none":
+        print("        reached_by: none (no pattern, and no crash names it)")
     if verdict.divergence:
         print(f"        divergence: {verdict.divergence}")
     if verdict.canary_divergence:

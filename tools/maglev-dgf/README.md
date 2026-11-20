@@ -267,6 +267,17 @@ The verdict is then a 2×2:
 | does not fire | fires | `canary-only` — the canary's own footprint, discarded |
 | does not fire | does not fire | `clean` — or `unreached`, if the target's trace did not match |
 
+`unreached` is decided in two steps, and both ask *this* target. The trace run
+has to print the target's `required_patterns` (all of them) and its
+`hit_patterns` (`min_hits` of them); a crash is the second witness, and it only
+counts when the report names the target: a basename from the target's
+`sources` (`# Fatal error in ../../src/maglev/maglev-truncation.cc`, or a frame
+of the stack trace) or a symbol from its `bug_classes` (`ForInNext`,
+`promote_post_loop_type`). A DCHECK in the graph builder therefore does not
+make an input "reached" truncation, even though both are Maglev — without that
+rule every crash anywhere in Maglev turned any mutant into a `candidate`. The
+witness is in the JSON as `reached_by`: `trace`, `crash`, or `none`.
+
 `verify` exits non-zero when it produced a `candidate`, so a loop over a mutant
 directory stops on the first real finding instead of burying it in a log.
 
@@ -291,7 +302,13 @@ directory stops on the first real finding instead of burying it in a log.
    `seed`, `trigger`, `bug_classes`, `oracle`). A flag that changes which graph
    is built (for example `--maglev-non-eager-inlining`) belongs in
    `config_flags`: it is passed to every run, including the differential and
-   `verify`, while `trace_flags` are only passed to the traced run.
+   `verify`, while `trace_flags` are only passed to the traced run. `sources`
+   is not documentation only: `verify` treats a crash as proof that the target
+   was reached when the report names one of those files, so keep the
+   `path:Symbol` form. `bug_classes` is read the same way, through the symbol
+   tokens in it (`ForInNext`, `promote_post_loop_type`), so name the checks
+   and node types a crash of this bug class would print rather than describing
+   them only in prose.
 4. Run `python3 tools/maglev-dgf/dgf.py check <id> -v` and confirm `[HIT ]`
    plus, for `--trace-maglev-escape-analysis`, that the pattern matches the
    line you expect.
