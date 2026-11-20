@@ -124,6 +124,7 @@ difference is a compiler bug:
 | `extra-arg` | `f(a)` -> `f(a, 0)` | arity feedback, inlined frame layout |
 | `identity-call` | `f(a)` -> `f(__dgf_identity(a))` | an extra (inlined) call, new feedback slot |
 | `call-duplicate` | `f(a);` -> `f(a); void f(a);` | a second call site: polymorphic feedback, call frequency |
+| `inline-arg-rep-change` | `f(5)` -> `f(5.0)`, `f(x)` -> `f((x + 0.5) \| 0)` | the representation of the value handed to an inlined callee: the caller passes a HeapNumber where the callee's `CheckedSmiUntag` still assumes a Smi (targets `inlined-smi-proof`) |
 | `redundant-truncation` | `x \| 0` -> `x \| 0 \| 0` | the truncation pass, value unchanged |
 | `smi-dot-zero` | `1000` -> `1000.0` | literal kind / representation hint |
 | `smi-to-heapnumber` | `7` -> `7.0` | a value's representation: the same number as a HeapNumber, not a Smi (targets `value-equal-smi`; strings, comments and `a[0]` indices are skipped) |

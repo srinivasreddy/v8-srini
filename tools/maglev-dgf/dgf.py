@@ -626,6 +626,52 @@ def op_call_duplicate(src: str, rng: random.Random, ctx: dict) -> str | None:
     return src[:line_end] + inserted + src[line_end:]
 
 
+def _numeric_identifier(src: str, name: str) -> bool:
+    """Whether `name` is used in `name + n` / `n - name` somewhere.
+
+    That is the only signal the source gives that a variable holds a Number
+    rather than a boolean or an object, which decides whether an offset can
+    be added to it.
+    """
+    ident = re.escape(name)
+    return bool(
+        re.search(rf"(?<![\w.$]){ident}\s*[+\-]\s*\d", src) or
+        re.search(rf"\d\s*[+\-]\s*{ident}\b", src))
+
+
+def op_inline_arg_rep_change(src: str, rng: random.Random,
+                             ctx: dict) -> str | None:
+    """`f(5)` -> `f(5.0)`, `f(x)` -> `f((x + 0.5) | 0)`: a HeapNumber argument.
+
+    The inliner splices the callee in with the caller's argument node as the
+    callee's parameter (src/maglev/maglev-inlining.cc:BuildInlineFunction)
+    and the callee's Smi proof is re-derived from the call feedback
+    (src/maglev/maglev-reducer-inl.h:BuildCheckSmi), so the representation
+    the *caller* passes is what the CheckedSmiUntag in the inlined body ends
+    up on. A float literal keeps the value (`5.0 + 1 === 5 + 1`) while being
+    a HeapNumber; an arithmetic argument is truncated back to an integer, so
+    the callee's own `| 0` arithmetic still sees the same Int32.
+    """
+    candidates = []
+    for name in ctx["functions"]:
+        for site in _call_sites(src, name):
+            first, rest = _split_first_arg(site.args)
+            arg = first.strip()
+            if re.fullmatch(r"\d+", arg):
+                new = f"{arg}.0"
+            elif (re.fullmatch(r"[A-Za-z_$][\w$]*", arg) and
+                  _numeric_identifier(src, arg)):
+                new = f"({arg} + 0.5) | 0"
+            else:
+                continue
+            candidates.append((name, site, new, rest))
+    if not candidates:
+        return None
+    name, site, new, rest = rng.choice(candidates)
+    call = f"{name}({new}{rest})"
+    return src[:site.start] + call + src[site.end:]
+
+
 def op_redundant_truncation(src: str, rng: random.Random,
                             ctx: dict) -> str | None:
     """`x | 0` -> `x | 0 | 0`: feeds the truncation pass, value unchanged."""
@@ -917,6 +963,7 @@ OPS = [
     ("extra-arg", op_extra_arg),
     ("identity-call", op_identity_call),
     ("call-duplicate", op_call_duplicate),
+    ("inline-arg-rep-change", op_inline_arg_rep_change),
     ("redundant-truncation", op_redundant_truncation),
     ("smi-dot-zero", op_smi_dot_zero),
     ("smi-to-heapnumber", op_smi_to_heapnumber),
