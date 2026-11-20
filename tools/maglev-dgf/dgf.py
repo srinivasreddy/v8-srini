@@ -264,7 +264,7 @@ def reachability(target: dict, output: str) -> list[str]:
     hits = count_hits(target, output)
     missing = missing_patterns(target, hits)
     required = required_hits(target)
-    matched = sum(hits.values())
+    matched = sum(hits.get(p, 0) for p in (target.get("hit_patterns") or []))
     if required and matched < required:
         absent = [
             p
@@ -535,6 +535,10 @@ def _skippable_prefix(prefix: str) -> bool:
     the program. Escaped quotes (`\\"`, `\\'`) and escaped backslashes
     (`\\\\`) are handled, so a `//` inside a string cannot "unlock" a comment
     that follows it.
+
+    TODO: Scans the current line only: a call on a later line of a multi-line
+    template literal is still reported, and a call inside `${...}` is still
+    missed.
     """
     i = 0
     quote: str | None = None
