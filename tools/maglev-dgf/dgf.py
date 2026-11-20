@@ -744,7 +744,16 @@ def op_inline_arg_rep_change(src: str, rng: random.Random, ctx: dict) -> str | N
             elif re.fullmatch(r"[A-Za-z_$][\w$]*", arg) and _numeric_identifier(
                 src, arg
             ):
-                new = f"({arg} + 0.5) | 0"
+                #-new = f"({arg} + 0.5) | 0"
+                # `x - 0.0` is value-preserving for every integer (and
+                # `-0 - 0.0` keeps the sign, unlike `x + 0.0`, which turns
+                # `-0` into `+0`), while still producing a Float64 /
+                # HeapNumber node at the call site -- the representation
+                # the callee's Smi proof must not assume. `(x + 0.5) | 0`
+                # used to be here, but `| 0` truncates toward zero, so it
+                # turned every negative integer into `x + 1` and broke the
+                # seed's self-check (`seed_broken`).
+                new = f"({arg} - 0.0)"
             else:
                 continue
             candidates.append((name, site, new, rest))
