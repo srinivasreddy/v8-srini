@@ -25,6 +25,11 @@ Subcommands:
   direct --target ID      mutate only the values that control a representation
                           proof, and keep the mutants that reach a new
                           optimization path (coverage from the graph dump)
+  minimize FILE --target ID
+                          shrink a diverging candidate while the differential
+                          still fires: slot values back to the seed's default,
+                          loop bounds to 1, list literals to one element, and
+                          away the comments that only explain the template
   verify FILE ...         deterministic verification of a candidate: clean
                           differential, --maglev-assert-types, and (optionally)
                           an injected-fault canary build
@@ -1213,11 +1218,15 @@ def cmd_direct(args, targets: list[dict]) -> int:
     def evaluate(combo: dict, index: int) -> int:
         """Renders, runs and reports one candidate; returns its distance."""
         values = {**fixed, **combo}
-        source = render_template(template, values)
+        # Every saved candidate is self-describing: the header records the
+        # slot values it rendered, which is what `minimize` is allowed to
+        # move. A render without it can only be reduced as text.
+        candidate = candidate_header(target, values) + render_template(
+            template, values)
         label = " ".join(f"{k}={v}" for k, v in sorted(combo.items()))
         with tempfile.TemporaryDirectory(prefix="dgf-direct-") as tmp:
             testcase = Path(tmp) / f"{target['id']}-{index:04d}.js"
-            testcase.write_text(source)
+            testcase.write_text(candidate)
             trace = run_d8(d8, testcase,
                            maglev_flags(target, args.extra_flag),
                            args.timeout)
@@ -1237,6 +1246,11 @@ def cmd_direct(args, targets: list[dict]) -> int:
             if baseline.self_check_failed or baseline.crashed:
                 stats["seed_broken"] += 1
                 return dist
+            # Minimize while the candidate file still exists: the reduction is
+            # a report, and a report has to be the input the detector needs.
+            minimized = (minimize_candidate(testcase, target, d8, args.timeout,
+                                            args.extra_flag)
+                         if divergence else None)
             if new_path:
                 stats["new_paths"] += 1
                 corpus[signature.digest] = {
@@ -1255,7 +1269,7 @@ def cmd_direct(args, targets: list[dict]) -> int:
                 # The distance is part of the name, so a sorted directory
                 # listing is the search's best-first order.
                 path = outdir / f"{target['id']}-d{dist:03d}-{index:04d}.js"
-                path.write_text(source)
+                path.write_text(candidate)
                 status = ("DIFF" if divergence else
                           "NEW " if new_path else "...")
                 print(f"[{status}] {path.name}  {label}"
@@ -1269,6 +1283,12 @@ def cmd_direct(args, targets: list[dict]) -> int:
                              else f"  missing: {', '.join(missing)}"))
                 if divergence:
                     print(f"        {divergence}")
+                    if minimized is not None:
+                        min_path = (outdir /
+                                    f"{target['id']}-{index:04d}-min.js")
+                        min_path.write_text(minimized.source)
+                        print(f"        minimized: {min_path.name}  "
+                              f"{minimized.summary()}")
         if log:
             log.write(json.dumps({
                 "target": target["id"],
@@ -1278,6 +1298,8 @@ def cmd_direct(args, targets: list[dict]) -> int:
                 "new_path": new_path,
                 "missing": missing,
                 "divergence": divergence,
+                "minimized_lines": (minimized.lines_after
+                                    if minimized is not None else None),
             }) + "\n")
             log.flush()
         return dist
@@ -1333,6 +1355,190 @@ def cmd_direct(args, targets: list[dict]) -> int:
         print(f"distance (seed={seed_distance}): "
               + " ".join(f"{dist}={count}" for dist, count in histogram))
     return 1 if stats["divergences"] else 0
+
+
+# --------------------------------------------------------------------------
+# Minimization
+#
+# A divergence is only actionable once the input that produces it is small: a
+# full template render carries every fact the catalog knows about, and the bug
+# usually needs one of them. The reduction is greedy and keeps a change only
+# when the *same* detector still fires, so every step is a witness -- the
+# reduced file diverges, and so does every file between it and the candidate
+# it was cut from.
+# --------------------------------------------------------------------------
+
+# One line at the top of every saved candidate, so that `minimize` knows which
+# template and which slot values produced it. A rendered candidate is
+# otherwise indistinguishable from a hand-written test, and the slot values
+# are exactly the facts a reduction is allowed to move.
+CANDIDATE_HEADER = "// dgf-candidate: "
+HEADER_RE = re.compile(
+    r"^" + re.escape(CANDIDATE_HEADER) + r"(\{.*\})$", re.M)
+
+# A JavaScript numeric literal: `1`, `-0.0`, `1e0`, `.5`.
+NUMBER_RE = re.compile(r"-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?")
+
+
+def candidate_header(target: dict, values: dict) -> str:
+    """The self-describing first line of a saved candidate."""
+    return CANDIDATE_HEADER + json.dumps(
+        {"target": target["id"], "slots": values}, sort_keys=True) + "\n"
+
+
+def candidate_values(source: str) -> dict[str, str]:
+    """The slot values a saved candidate recorded for itself."""
+    match = HEADER_RE.search(source)
+    if not match:
+        return {}
+    try:
+        header = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return {}
+    return {str(name): str(value)
+            for name, value in (header.get("slots") or {}).items()}
+
+
+def is_number(value: str) -> bool:
+    """True for a value that is a number literal, not an expression."""
+    return bool(NUMBER_RE.fullmatch(value.strip()))
+
+
+def single_element(value: str) -> str | None:
+    """`[a, b, c]` -> `[a]`; None when the value is not a list literal."""
+    text = value.strip()
+    if not (text.startswith("[") and text.endswith("]")):
+        return None
+    first, _ = _split_first_arg(text[1:-1])
+    return f"[{first.strip()}]" if first.strip() else None
+
+
+def compact_source(source: str) -> str:
+    """Drops blank and comment-only lines; the report is the program.
+
+    The candidate header and the seed's `// Flags:` lines stay, because they
+    are how the reduced file is reproduced; every other comment only explains
+    the template it was cut from. Comments after code are kept: dropping
+    those would need a JavaScript lexer.
+    """
+    keep = (CANDIDATE_HEADER.strip(), "// Flags:")
+    lines = [line.rstrip() for line in source.splitlines()
+             if line.strip() and
+             (not line.lstrip().startswith("//") or
+              line.lstrip().startswith(keep))]
+    return "\n".join(lines) + "\n"
+
+
+@dataclasses.dataclass
+class Minimized:
+    """A reduced candidate that still diverges, and what it needed."""
+    source: str
+    lines_before: int
+    lines_after: int
+    values: dict[str, str]
+    changes: list[str]
+
+    def summary(self) -> str:
+        return (f"{self.lines_before} -> {self.lines_after} lines; " +
+                (", ".join(self.changes) or "no slot change"))
+
+
+def minimize_candidate(testcase: Path, target: dict, d8: Path, timeout: float,
+                       extra_flags: Sequence[str] = ()) -> Minimized | None:
+    """Reduces a diverging candidate to the facts the detector needs.
+
+    Step 1 renders the template with the slot values the candidate recorded,
+    so a reduction moves a *fact*, not text. Steps 2-4 then walk the slots:
+    back to the seed's default (the catalog lists it first), a numeric value
+    down to 1 (loop bounds), and a list literal down to one element. A step
+    is kept only when the differential still fires on the re-render. Step 5
+    drops the comments that only explain the template.
+
+    A candidate without a header (a `fuzz` mutant, not a template render) is
+    reduced as text, i.e. by step 5 alone.
+
+    Returns None when nothing diverging was left, which is the honest answer
+    for "the reduction was not sound": the caller then keeps the original.
+    """
+    original = testcase.read_text()
+    spec = target.get("directed") or {}
+    recorded = candidate_values(original)
+    fixed = dict(spec.get("fixed") or {})
+    families: dict[str, list[str]] = {}
+    template = None
+    if recorded:
+        if not spec.get("template"):
+            raise SystemExit(f"{testcase}: records slot values, but target "
+                             f"{target['id']} has no 'directed.template'")
+        template = (HERE / spec["template"]).read_text()
+        families = slot_families(spec)
+
+    def render(values: dict) -> str:
+        if template is None:
+            return original
+        return candidate_header(target, values) + render_template(
+            template, {**fixed, **values})
+
+    answers: dict[str, bool] = {}
+
+    def diverges(source: str) -> bool:
+        """The detector that found the candidate: maglev vs ignition."""
+        if source not in answers:
+            with tempfile.TemporaryDirectory(prefix="dgf-min-") as tmp:
+                trial = Path(tmp) / testcase.name
+                trial.write_text(source)
+                _, _, divergence = differential_check(
+                    d8, target, trial, timeout, extra_flags)
+                answers[source] = divergence is not None
+        return answers[source]
+
+    if not diverges(original):
+        return None
+
+    changes: list[str] = []
+    current = {name: recorded.get(name, family[0])
+               for name, family in families.items()}
+
+    def try_value(name: str, value: str, why: str) -> None:
+        """Keeps a reduction only if the detector fires without the fact."""
+        nonlocal current
+        if current[name] == value:
+            return
+        trial = {**current, name: value}
+        if diverges(render(trial)):
+            changes.append(f"{name}: {current[name]} -> {value} ({why})")
+            current = trial
+
+    # Step 2: back to the seed's default, one slot at a time, so that a
+    # surviving value is a fact the bug needs rather than a fact the template
+    # happened to render.
+    for name, family in families.items():
+        try_value(name, family[0], "seed")
+
+    # Step 3: a numeric slot, e.g. an iteration count, only has to be 1.
+    for name in families:
+        if is_number(current[name]):
+            try_value(name, "1", "one")
+
+    # Step 4: a list literal only has to have one element.
+    for name in families:
+        reduced = single_element(current[name])
+        if reduced is not None:
+            try_value(name, reduced, "one element")
+
+    # The template is only authoritative when re-rendering it reproduces the
+    # divergence; a hand-edited candidate keeps the text it came with.
+    source = render(current) if diverges(render(current)) else original
+    compacted = compact_source(source)
+    if not diverges(compacted):
+        compacted = source
+    return Minimized(
+        source=compacted,
+        lines_before=len(original.splitlines()),
+        lines_after=len(compacted.splitlines()),
+        values=current,
+        changes=changes,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -1675,13 +1881,19 @@ def cmd_fuzz(args, targets: list[dict]) -> int:
                 testcase.write_text(src)
                 report = check_target(d8, target, args.timeout,
                                       differential=True, testcase=testcase)
-            # A mutant that breaks the seed's own value check invalidates the
-            # oracle for this input (the expected value moved, not the
-            # compiler), so it is not counted as a divergence.
-            if (report.baseline is None or report.baseline.self_check_failed
-                    or report.baseline.crashed):
-                stats["seed_broken"] += 1
-                continue
+                # A mutant that breaks the seed's own value check invalidates
+                # the oracle for this input (the expected value moved, not the
+                # compiler), so it is not counted as a divergence.
+                if (report.baseline is None
+                        or report.baseline.self_check_failed
+                        or report.baseline.crashed):
+                    stats["seed_broken"] += 1
+                    continue
+                # The report is minimized while its file still exists: a saved
+                # mutant is a full seed, and only some of it is the bug.
+                minimized = (minimize_candidate(testcase, target, d8,
+                                                args.timeout)
+                             if report.divergence else None)
             if report.hit:
                 stats["hit"] += 1
             else:
@@ -1695,6 +1907,10 @@ def cmd_fuzz(args, targets: list[dict]) -> int:
                 divergences.append((path, report))
                 print(f"[DIFF] {path} ({'+'.join(applied)})")
                 print(f"       {report.divergence}")
+                if minimized is not None:
+                    min_path = outdir / f"{target['id']}-{i:04d}-min.js"
+                    min_path.write_text(minimized.source)
+                    print(f"[min ] {min_path}  {minimized.summary()}")
             if log:
                 record = report.to_json()
                 record.update({"iteration": i, "mutators": applied})
@@ -1709,6 +1925,25 @@ def cmd_fuzz(args, targets: list[dict]) -> int:
           f"miss={stats['miss']} seed_broken={stats['seed_broken']} "
           f"divergences={stats['divergence']}")
     return 1 if divergences else 0
+
+
+def cmd_minimize(args, targets: list[dict]) -> int:
+    d8 = require_d8(Path(args.d8) if args.d8 else default_d8())
+    target = find_target(targets, args.target)
+    path = Path(args.file).expanduser().resolve()
+    if not path.exists():
+        raise SystemExit(f"missing candidate {path}")
+    minimized = minimize_candidate(path, target, d8, args.timeout,
+                                   args.extra_flag)
+    if minimized is None:
+        print(f"[MIN ] {path.name}: no longer diverges; the candidate was "
+              f"minimized away")
+        return 1
+    out = path.with_suffix(".min.js")
+    out.write_text(minimized.source)
+    print(f"[MIN ] {out}")
+    print(f"        {minimized.summary()}")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1776,6 +2011,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--extra-flag", action="append", default=[],
                    help="extra d8 flag, may be repeated")
 
+    p = sub.add_parser("minimize", parents=[common],
+                       help="shrink a diverging candidate while it still "
+                            "diverges")
+    p.add_argument("file", help="candidate file, e.g. from `direct`")
+    p.add_argument("--target", required=True,
+                   help="target whose template and flags to use")
+    p.add_argument("--extra-flag", action="append", default=[],
+                   help="extra d8 flag, may be repeated")
+
     p = sub.add_parser("verify", parents=[common],
                        help="deterministic verification of a candidate")
     p.add_argument("items", nargs="+",
@@ -1820,6 +2064,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_fuzz(args, targets)
     if args.cmd == "direct":
         return cmd_direct(args, targets)
+    if args.cmd == "minimize":
+        return cmd_minimize(args, targets)
     if args.cmd == "verify":
         return cmd_verify(args, targets)
     if args.cmd == "canary":

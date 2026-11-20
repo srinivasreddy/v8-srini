@@ -12,7 +12,7 @@ It consists of these parts:
 | -------------- | ---- |
 | `targets.json` | Catalog: subsystem, C++ entry points, the d8 trace configuration that proves reachability, the seed that reaches it, and (optionally) the directed-mutation slots of that seed. |
 | `seeds/*.js`   | Hand-written, self-checking inputs. They assert only that Maglev was used (guarded `%ActiveTierIsMaglev`) and that their expected values are right. |
-| `dgf.py`       | Driver: `targets` (list), `check` (reachability + differential), `fuzz` (target-aware mutation), `direct` (value-directed mutation), `verify` (deterministic verification), `canary` (injected-fault build). |
+| `dgf.py`       | Driver: `targets` (list), `check` (reachability + differential), `fuzz` (target-aware mutation), `direct` (value-directed mutation), `minimize` (shrink a divergent candidate), `verify` (deterministic verification), `canary` (injected-fault build). |
 | `templates/*.tmpl.js` | Slot templates for `direct`: the same shape as a seed, with the facts that control a representation proof left as `{{SLOT}}` markers. |
 | `canary/*.patch` | Injected faults for `verify`'s positive control: one proof taken on faith, applied to the source and built into a separate d8. |
 
@@ -87,6 +87,11 @@ python3 tools/maglev-dgf/dgf.py fuzz --target osr-entry --iterations 50 \
 # "directed" section in the catalog entry).
 python3 tools/maglev-dgf/dgf.py direct --target kna-replay-elision \
     --iterations 20 --random-seed 1 -v
+
+# Shrink a saved candidate while the differential still fires.
+python3 tools/maglev-dgf/dgf.py minimize \
+    mutants/kna-replay-elision/kna-replay-elision-d002-0003.js \
+    --target kna-replay-elision
 
 # Deterministic verification, optionally against an injected-fault build.
 python3 tools/maglev-dgf/dgf.py canary --fault elide-check-smi
@@ -175,6 +180,57 @@ graph still has (`want_present`). The score prefixes the saved file name
 `mutants/<target>/` is the search's best-first order, and the summary prints
 the distance histogram next to the seed's own distance.
 
+## Minimization (`minimize`)
+
+A divergence is only actionable once the input that produces it is small: a
+full template render carries every fact the catalog knows about, and the bug
+usually needs one of them. Every candidate `direct` saves therefore starts
+with one extra line, which is what a reduction is allowed to move:
+
+```js
+// dgf-candidate: {"slots": {"FIELD_REPR": "smi", "GC_POSITION": "after", "TRIGGER_VAL": "-0.0", "WARMUP_VAL": "2"}, "target": "value-equal-smi"}
+```
+
+`minimize` re-renders the target's template with those slot values, then
+greedily removes facts and keeps a step only when the *same* detector — the
+differential — still fires on the result:
+
+1. every slot goes back to the seed's default (the catalog lists it first);
+2. a numeric value, e.g. an iteration count, goes down to `1`;
+3. a list literal goes down to one element;
+4. the comments that only explain the template are dropped, so the report is
+   the program. The candidate header and the seed's `// Flags:` lines stay.
+
+```bash
+python3 tools/maglev-dgf/dgf.py minimize \
+    mutants/value-equal-smi/value-equal-smi-d000-0002.js \
+    --target value-equal-smi
+# [MIN ] mutants/value-equal-smi/value-equal-smi-d000-0002.min.js
+#         76 -> 24 lines; WARMUP_VAL: 2 -> 1 (seed)
+```
+
+`minimize` writes `<FILE>.min.js` and exits 0 while the reduced file still
+diverges, 1 when the reduction took the divergence away — then the candidate
+has to be kept as it was. `fuzz` and `direct` call it themselves: a
+divergence also writes `<target>-<iteration>-min.js`, so the first report of
+a real bug is already the small one.
+
+A `fuzz` mutant is not a template render and records no slot values, so only
+step 4 applies to it, and the differential is re-checked on the compacted
+text. The reduction is greedy and conservative: it never keeps a step it did
+not observe diverging, and a rejected step is not revisited.
+
+The acceptance run for the whole path uses the injected-fault build, because
+the clean build does not diverge on `value-equal-smi`:
+
+```bash
+python3 tools/maglev-dgf/dgf.py canary --fault value-equal-check   # once
+python3 tools/maglev-dgf/dgf.py direct --target value-equal-smi \
+    --iterations 20 --random-seed 0 --d8 out/x64.asan-fuzz/d8.dgf-canary
+python3 tools/maglev-dgf/dgf.py verify mutants/value-equal-smi/*-min.js \
+    --target value-equal-smi --d8 out/x64.asan-fuzz/d8.dgf-canary
+```
+
 ## Deterministic verification (`verify`, `canary`)
 
 `verify` runs the two detectors that decide whether a candidate is real:
@@ -262,6 +318,10 @@ python3 tools/clusterfuzz/foozzie/v8_foozzie.py \
   shape; a mutator that cannot apply returns `None` instead of guessing.
 * `direct` needs a `directed` section in the catalog and a template whose
   slots are the values under study; it does not derive either from a seed.
+* `minimize` is greedy and value-directed, not a reducer: it moves the
+  template's slots and drops comment-only lines, it does not delete
+  statements, and a step it rejected is never retried. A candidate that
+  records no slot values (a `fuzz` mutant) only loses its comments.
 * The coverage signature is a graph-dump fingerprint, not edge coverage: it
   answers "did this value change the compilation", and can be blind to two
   graphs that differ only in control flow.
