@@ -168,8 +168,7 @@ def default_d8() -> Path:
     return Path(found) if found else V8_ROOT / "out" / "x64.release" / "d8"
 
 
-def run_d8(d8: Path, testcase: Path, flags: Sequence[str],
-           timeout: float) -> D8Result:
+def run_d8(d8: Path, testcase: Path, flags: Sequence[str], timeout: float) -> D8Result:
     cmd = [str(d8)] + list(flags) + [str(testcase)]
     started = time.time()
     try:
@@ -249,8 +248,7 @@ def missing_patterns(target: dict, counts: dict[str, int]) -> list[str]:
     are signatures that must all be present, e.g. both the node the seed
     builds and the pass that consumes it.
     """
-    return [p for p in target.get("required_patterns") or []
-            if counts.get(p, 0) == 0]
+    return [p for p in target.get("required_patterns") or [] if counts.get(p, 0) == 0]
 
 
 def reachability(target: dict, output: str) -> list[str]:
@@ -268,8 +266,11 @@ def reachability(target: dict, output: str) -> list[str]:
     required = required_hits(target)
     matched = sum(hits.values())
     if required and matched < required:
-        absent = [p for p in target.get("hit_patterns") or []
-                  if hits.get(p, 0) == 0 and p not in missing]
+        absent = [
+            p
+            for p in target.get("hit_patterns") or []
+            if hits.get(p, 0) == 0 and p not in missing
+        ]
         # An alternative that matched, but too few times, has no absent
         # pattern to name: report the count instead.
         missing += absent or [f"{required} hits (got {matched})"]
@@ -288,8 +289,9 @@ def evidence(target: dict, output: str, limit: int = 3) -> list[str]:
     return found
 
 
-def maglev_flags(target: dict, extra: Sequence[str] = (),
-                 trace: bool = True) -> list[str]:
+def maglev_flags(
+    target: dict, extra: Sequence[str] = (), trace: bool = True
+) -> list[str]:
     """Flags for the Maglev configuration.
 
     `config_flags` are part of the configuration, not of the tracing: they
@@ -297,17 +299,20 @@ def maglev_flags(target: dict, extra: Sequence[str] = (),
     are also passed to the runs that are compared against the baseline.
     `trace_flags` only make the run observable and may be dropped.
     """
-    flags = (FOOZZIE_COMMON_FLAGS + CONFIG_FLAGS["ignition_maglev"] +
-             SEED_FLAGS + list(target.get("config_flags") or []) +
-             list(extra))
+    flags = (
+        FOOZZIE_COMMON_FLAGS
+        + CONFIG_FLAGS["ignition_maglev"]
+        + SEED_FLAGS
+        + list(target.get("config_flags") or [])
+        + list(extra)
+    )
     if trace:
         flags += list(target.get("trace_flags") or [])
     return flags
 
 
 def baseline_flags(extra: Sequence[str] = ()) -> list[str]:
-    return (FOOZZIE_COMMON_FLAGS + CONFIG_FLAGS["ignition"] + SEED_FLAGS +
-            list(extra))
+    return FOOZZIE_COMMON_FLAGS + CONFIG_FLAGS["ignition"] + SEED_FLAGS + list(extra)
 
 
 ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{4,}")
@@ -348,8 +353,7 @@ class TargetReport:
 
     @property
     def ok(self) -> bool:
-        return (self.hit and self.divergence is None and
-                not self.maglev.crashed)
+        return self.hit and self.divergence is None and not self.maglev.crashed
 
     def to_json(self) -> dict:
         return {
@@ -362,8 +366,7 @@ class TargetReport:
             "evidence": self.evidence,
             "maglev": self.maglev.describe(),
             "maglev_rc": self.maglev.returncode,
-            "maglev_clean":
-                self.maglev_clean.describe() if self.maglev_clean else None,
+            "maglev_clean": self.maglev_clean.describe() if self.maglev_clean else None,
             "baseline": self.baseline.describe() if self.baseline else None,
             "divergence": self.divergence,
         }
@@ -372,39 +375,48 @@ class TargetReport:
 def compare(maglev: D8Result, baseline: D8Result) -> str | None:
     """Returns a human readable divergence description, or None."""
     if maglev.crashed != baseline.crashed:
-        return (f"crash mismatch: maglev={maglev.describe()} "
-                f"baseline={baseline.describe()}")
+        return (
+            f"crash mismatch: maglev={maglev.describe()} baseline={baseline.describe()}"
+        )
     if maglev.timed_out != baseline.timed_out:
-        return (f"timeout mismatch: maglev={maglev.describe()} "
-                f"baseline={baseline.describe()}")
+        return (
+            f"timeout mismatch: maglev={maglev.describe()} "
+            f"baseline={baseline.describe()}"
+        )
     if normalize(maglev.output) != normalize(baseline.output):
         return "output mismatch"
     if maglev.returncode != baseline.returncode:
-        return (f"exit code mismatch: {maglev.returncode} vs "
-                f"{baseline.returncode}")
+        return f"exit code mismatch: {maglev.returncode} vs {baseline.returncode}"
     return None
 
 
-
-
-def differential_check(d8: Path, target: dict, testcase: Path, timeout: float,
-                       extra_flags: Sequence[str] = ()
-                       ) -> tuple[D8Result, D8Result, str | None]:
+def differential_check(
+    d8: Path,
+    target: dict,
+    testcase: Path,
+    timeout: float,
+    extra_flags: Sequence[str] = (),
+) -> tuple[D8Result, D8Result, str | None]:
     """Runs the same input in the Maglev and the baseline configuration.
 
     Trace flags dump the graph, which is not comparable across tiers, so this
     repeats the Maglev config *without* them.
     """
     maglev_clean = run_d8(
-        d8, testcase, maglev_flags(target, extra_flags, trace=False), timeout)
+        d8, testcase, maglev_flags(target, extra_flags, trace=False), timeout
+    )
     baseline = run_d8(d8, testcase, baseline_flags(extra_flags), timeout)
     return maglev_clean, baseline, compare(maglev_clean, baseline)
 
 
-def check_target(d8: Path, target: dict, timeout: float,
-                 differential: bool = True,
-                 extra_flags: Sequence[str] = (),
-                 testcase: Path | None = None) -> TargetReport:
+def check_target(
+    d8: Path,
+    target: dict,
+    timeout: float,
+    differential: bool = True,
+    extra_flags: Sequence[str] = (),
+    testcase: Path | None = None,
+) -> TargetReport:
     seed = testcase or seed_path(target)
     maglev = run_d8(d8, seed, maglev_flags(target, extra_flags), timeout)
     hits = count_hits(target, maglev.output)
@@ -421,8 +433,9 @@ def check_target(d8: Path, target: dict, timeout: float,
         missing=missing,
     )
     if differential:
-        report.maglev_clean, report.baseline, report.divergence = (
-            differential_check(d8, target, seed, timeout, extra_flags))
+        report.maglev_clean, report.baseline, report.divergence = differential_check(
+            d8, target, seed, timeout, extra_flags
+        )
     return report
 
 
@@ -432,18 +445,23 @@ def print_report(report: TargetReport, verbose: bool = False) -> None:
         status = "DIFF"
     if report.maglev.crashed:
         status = "CRASH"
-    print(f"[{status}] {report.target_id} "
-          f"({report.seed.rsplit('/', 1)[-1]})")
-    print(f"        maglev={report.maglev.describe()} "
-          f"({report.maglev.duration_s:.1f}s)"
-          + (f" maglev_clean={report.maglev_clean.describe()}"
-             if report.maglev_clean else "")
-          + (f" baseline={report.baseline.describe()}"
-             if report.baseline else ""))
+    print(f"[{status}] {report.target_id} ({report.seed.rsplit('/', 1)[-1]})")
+    print(
+        f"        maglev={report.maglev.describe()} "
+        f"({report.maglev.duration_s:.1f}s)"
+        + (
+            f" maglev_clean={report.maglev_clean.describe()}"
+            if report.maglev_clean
+            else ""
+        )
+        + (f" baseline={report.baseline.describe()}" if report.baseline else "")
+    )
     if report.hits:
-        print("        hits: " + ", ".join(
-            f"{p}x{c}" for p, c in report.hits.items())
-            + f" (need {report.required})")
+        print(
+            "        hits: "
+            + ", ".join(f"{p}x{c}" for p, c in report.hits.items())
+            + f" (need {report.required})"
+        )
     if report.missing:
         print("        missing: " + ", ".join(report.missing))
     for line in report.evidence:
@@ -480,9 +498,10 @@ function __dgf_identity(v) { return v; }
 @dataclasses.dataclass
 class CallSite:
     """A call expression found in the seed source."""
-    start: int   # index of the callee identifier
-    end: int     # index just past the closing parenthesis
-    args: str    # source text between the parentheses
+
+    start: int  # index of the callee identifier
+    end: int  # index just past the closing parenthesis
+    args: str  # source text between the parentheses
 
 
 def _find_matching_paren(src: str, open_idx: int) -> int:
@@ -508,6 +527,40 @@ def _find_matching_paren(src: str, open_idx: int) -> int:
     return -1
 
 
+def _skippable_prefix(prefix: str) -> bool:
+    """True if `prefix` ends inside a string, a line comment or a block comment.
+
+    A call site found after such a prefix is inside one of those, so it is not
+    a call site at all: mutating it would edit the comment or the string, not
+    the program. Escaped quotes (`\\"`, `\\'`) and escaped backslashes
+    (`\\\\`) are handled, so a `//` inside a string cannot "unlock" a comment
+    that follows it.
+    """
+    i = 0
+    quote: str | None = None
+    while i < len(prefix):
+        ch = prefix[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in "'\"`":
+            quote = ch
+        elif ch == "/" and i + 1 < len(prefix):
+            if prefix[i + 1] == "/":
+                return True  # line comment to end of line
+            if prefix[i + 1] == "*":
+                close = prefix.find("*/", i + 2)
+                if close < 0:
+                    return True  # unterminated block comment
+                i = close + 2
+                continue
+        i += 1
+    return quote is not None  # prefix ends inside a string
+
+
 def _call_sites(src: str, name: str) -> list[CallSite]:
     """All `name(...)` calls, with nested parentheses handled.
 
@@ -518,20 +571,16 @@ def _call_sites(src: str, name: str) -> list[CallSite]:
     pattern = re.compile(r"(?<![\w.$])" + re.escape(name) + r"\s*\(")
     for m in pattern.finditer(src):
         line_start = src.rfind("\n", 0, m.start()) + 1
-        prefix = src[line_start:m.start()]
-        comment_pos = prefix.find("//")
-        if (comment_pos >= 0 and "'" not in prefix[:comment_pos] and
-                '"' not in prefix[:comment_pos] and
-                "`" not in prefix[:comment_pos]):
+        prefix = src[line_start : m.start()]
+        if _skippable_prefix(prefix):
             continue
-        if src[:m.start()].rstrip().endswith("function"):
+        if src[: m.start()].rstrip().endswith("function"):
             continue
         open_idx = m.end() - 1
         close_idx = _find_matching_paren(src, open_idx)
         if close_idx < 0:
             continue
-        sites.append(CallSite(m.start(), close_idx + 1,
-                              src[open_idx + 1:close_idx]))
+        sites.append(CallSite(m.start(), close_idx + 1, src[open_idx + 1 : close_idx]))
     return sites
 
 
@@ -577,8 +626,9 @@ def _count_args(args: str) -> int:
         count += 1
 
 
-def _pick_call_site(src: str, rng: random.Random, names: list,
-                    require_args: bool) -> tuple[str | None, CallSite | None]:
+def _pick_call_site(
+    src: str, rng: random.Random, names: list, require_args: bool
+) -> tuple[str | None, CallSite | None]:
     """Picks a callee that is actually *called* in the source.
 
     A seed may pass a function as a value without ever calling it (`poly(add1,
@@ -588,8 +638,9 @@ def _pick_call_site(src: str, rng: random.Random, names: list,
     names = list(names)
     rng.shuffle(names)
     for name in names:
-        sites = [s for s in _call_sites(src, name)
-                 if s.args.strip() or not require_args]
+        sites = [
+            s for s in _call_sites(src, name) if s.args.strip() or not require_args
+        ]
         if sites:
             return name, rng.choice(sites)
     return None, None
@@ -602,27 +653,24 @@ def op_extra_arg(src: str, rng: random.Random, ctx: dict) -> str | None:
     `f(1)` computes `1 + undefined`, so appending a `0` would move the
     result and the seed's self-check would reject the mutant.
     """
-    name, site = _pick_call_site(src, rng, ctx["functions"],
-                                 require_args=False)
+    name, site = _pick_call_site(src, rng, ctx["functions"], require_args=False)
     if site is None:
         return None
     arity = (ctx.get("arities") or {}).get(name)
     if arity is not None and arity > _count_args(site.args):
         return None
-    call = (f"{name}({site.args}, 0)" if site.args.strip()
-            else f"{name}(0)")
-    return src[:site.start] + call + src[site.end:]
+    call = f"{name}({site.args}, 0)" if site.args.strip() else f"{name}(0)"
+    return src[: site.start] + call + src[site.end :]
 
 
 def op_identity_call(src: str, rng: random.Random, ctx: dict) -> str | None:
     """f(a) -> f(__dgf_identity(a)): adds a callee, keeps the value."""
-    name, site = _pick_call_site(src, rng, ctx["functions"],
-                                 require_args=True)
+    name, site = _pick_call_site(src, rng, ctx["functions"], require_args=True)
     if site is None:
         return None
     first, rest = _split_first_arg(site.args)
     call = f"{name}(__dgf_identity({first}){rest})"
-    return src[:site.start] + call + src[site.end:]
+    return src[: site.start] + call + src[site.end :]
 
 
 def op_call_duplicate(src: str, rng: random.Random, ctx: dict) -> str | None:
@@ -650,9 +698,9 @@ def op_call_duplicate(src: str, rng: random.Random, ctx: dict) -> str | None:
     if not candidates:
         return None
     site, line_start, line_end = rng.choice(candidates)
-    indent = src[line_start:site.start]
-    indent = indent[:len(indent) - len(indent.lstrip())]
-    inserted = f"\n{indent}void {src[site.start:site.end]};"
+    indent = src[line_start : site.start]
+    indent = indent[: len(indent) - len(indent.lstrip())]
+    inserted = f"\n{indent}void {src[site.start : site.end]};"
     return src[:line_end] + inserted + src[line_end:]
 
 
@@ -665,12 +713,12 @@ def _numeric_identifier(src: str, name: str) -> bool:
     """
     ident = re.escape(name)
     return bool(
-        re.search(rf"(?<![\w.$]){ident}\s*[+\-]\s*\d", src) or
-        re.search(rf"\d\s*[+\-]\s*{ident}\b", src))
+        re.search(rf"(?<![\w.$]){ident}\s*[+\-]\s*\d", src)
+        or re.search(rf"\d\s*[+\-]\s*{ident}\b", src)
+    )
 
 
-def op_inline_arg_rep_change(src: str, rng: random.Random,
-                             ctx: dict) -> str | None:
+def op_inline_arg_rep_change(src: str, rng: random.Random, ctx: dict) -> str | None:
     """`f(5)` -> `f(5.0)`, `f(x)` -> `f((x + 0.5) | 0)`: a HeapNumber argument.
 
     The inliner splices the callee in with the caller's argument node as the
@@ -689,8 +737,9 @@ def op_inline_arg_rep_change(src: str, rng: random.Random,
             arg = first.strip()
             if re.fullmatch(r"\d+", arg):
                 new = f"{arg}.0"
-            elif (re.fullmatch(r"[A-Za-z_$][\w$]*", arg) and
-                  _numeric_identifier(src, arg)):
+            elif re.fullmatch(r"[A-Za-z_$][\w$]*", arg) and _numeric_identifier(
+                src, arg
+            ):
                 new = f"({arg} + 0.5) | 0"
             else:
                 continue
@@ -699,15 +748,15 @@ def op_inline_arg_rep_change(src: str, rng: random.Random,
         return None
     name, site, new, rest = rng.choice(candidates)
     call = f"{name}({new}{rest})"
-    return src[:site.start] + call + src[site.end:]
+    return src[: site.start] + call + src[site.end :]
 
 
-def op_redundant_truncation(src: str, rng: random.Random,
-                            ctx: dict) -> str | None:
+def op_redundant_truncation(src: str, rng: random.Random, ctx: dict) -> str | None:
     """`x | 0` -> `x | 0 | 0`: feeds the truncation pass, value unchanged."""
     lines = src.splitlines(True)
     candidates = [
-        i for i, line in enumerate(lines)
+        i
+        for i, line in enumerate(lines)
         if "| 0;" in line and not line.lstrip().startswith("//")
     ]
     if not candidates:
@@ -721,7 +770,8 @@ def op_smi_dot_zero(src: str, rng: random.Random, ctx: dict) -> str | None:
     """`=== 1000` -> `=== 1000.0`: same value, different literal kind."""
     lines = src.splitlines(True)
     candidates = [
-        i for i, line in enumerate(lines)
+        i
+        for i, line in enumerate(lines)
         if "===" in line and "[" not in line and "%" not in line
     ]
     if not candidates:
@@ -732,7 +782,7 @@ def op_smi_dot_zero(src: str, rng: random.Random, ctx: dict) -> str | None:
         return None
     m = rng.choice(literals)
     line = lines[i]
-    lines[i] = line[:m.end()] + ".0" + line[m.end():]
+    lines[i] = line[: m.end()] + ".0" + line[m.end() :]
     return "".join(lines)
 
 
@@ -744,8 +794,10 @@ INT_LITERAL_RE = re.compile(r"(?<![\w.])\d+(?![\w.])")
 # A `[` that follows a value opens a subscript; one that follows a keyword
 # or an operator opens an array literal whose elements are values.
 _VALUE_BEFORE_BRACKET = re.compile(r"(?:[\w$)\]]|['\"`])\s*$")
-_KEYWORD_BEFORE_BRACKET = re.compile(r"(?:return|typeof|in|of|case|new|void|"
-                                    r"delete|yield|await)\s*$")
+_KEYWORD_BEFORE_BRACKET = re.compile(
+    r"(?:return|typeof|in|of|case|new|void|"
+    r"delete|yield|await)\s*$"
+)
 
 
 def _is_subscript(src: str, open_idx: int) -> bool:
@@ -797,8 +849,7 @@ def _literal_skip_spans(src: str) -> list[tuple[int, int]]:
     return spans
 
 
-def op_smi_to_heapnumber(src: str, rng: random.Random,
-                          ctx: dict) -> str | None:
+def op_smi_to_heapnumber(src: str, rng: random.Random, ctx: dict) -> str | None:
     """`7` -> `7.0`: the same number, held as a HeapNumber, not as a Smi.
 
     The digits are untouched and `5.0 === 5`, so every expectation in the
@@ -817,15 +868,20 @@ def op_smi_to_heapnumber(src: str, rng: random.Random,
         # `1e-3`: the `3` sits after an exponent sign, and `1e-3.0` is not
         # a number.
         start = match.start()
-        return (start >= 3 and src[start - 1] in "+-" and
-                src[start - 2] in "eE" and src[start - 3].isdigit())
+        return (
+            start >= 3
+            and src[start - 1] in "+-"
+            and src[start - 2] in "eE"
+            and src[start - 3].isdigit()
+        )
 
-    candidates = [m for m in INT_LITERAL_RE.finditer(src)
-                  if not in_span(m) and not in_exponent(m)]
+    candidates = [
+        m for m in INT_LITERAL_RE.finditer(src) if not in_span(m) and not in_exponent(m)
+    ]
     if not candidates:
         return None
     match = rng.choice(candidates)
-    return src[:match.end()] + ".0" + src[match.end():]
+    return src[: match.end()] + ".0" + src[match.end() :]
 
 
 FLOAT64_LITERALS = ("1.5", "2.5", "0.5")
@@ -874,7 +930,7 @@ def _counting_loops(src: str) -> list[tuple[str, str, int, int]]:
         close_idx = _find_matching_paren(src, open_idx)
         if close_idx < 0:
             continue
-        parts = src[open_idx + 1:close_idx].split(";")
+        parts = src[open_idx + 1 : close_idx].split(";")
         if len(parts) != 3:
             continue
         init = re.match(r"\s*(?:let|var|const)?\s*(\w+)\s*=", parts[0])
@@ -895,8 +951,7 @@ def _counting_loops(src: str) -> list[tuple[str, str, int, int]]:
     return loops
 
 
-def op_backedge_rep_change(src: str, rng: random.Random,
-                           ctx: dict) -> str | None:
+def op_backedge_rep_change(src: str, rng: random.Random, ctx: dict) -> str | None:
     """`x = x + o.v` -> `x = (i === n - 1) ? 1.5 : (x + o.v)`.
 
     The header keeps its Smi while the value travelling the back edge is a
@@ -911,11 +966,10 @@ def op_backedge_rep_change(src: str, rng: random.Random,
     """
     assignments = []
     for index, last, body, body_end in _counting_loops(src):
-        for m in re.finditer(r"(?<![\w.$])(\w+)\s*=(?![=>])",
-                             src[body:body_end]):
+        for m in re.finditer(r"(?<![\w.$])(\w+)\s*=(?![=>])", src[body:body_end]):
             name = m.group(1)
             declared = rf"\b(?:let|var)\s+{re.escape(name)}\b"
-            if not re.search(declared, src[:body + m.end()]):
+            if not re.search(declared, src[: body + m.end()]):
                 continue
             expr_start = body + m.end()
             expr_end = _top_level_after(src, expr_start, ";")
@@ -924,9 +978,15 @@ def op_backedge_rep_change(src: str, rng: random.Random,
             raw = src[expr_start:expr_end]
             lead = len(raw) - len(raw.lstrip())
             trail = len(raw) - len(raw.rstrip())
-            assignments.append((index, last, expr_start + lead,
-                                expr_end - trail,
-                                src[expr_start + lead:expr_end - trail]))
+            assignments.append(
+                (
+                    index,
+                    last,
+                    expr_start + lead,
+                    expr_end - trail,
+                    src[expr_start + lead : expr_end - trail],
+                )
+            )
     if not assignments:
         return None
     var, last, start, end, expr = rng.choice(assignments)
@@ -949,7 +1009,7 @@ def op_loop_bound_or(src: str, rng: random.Random, ctx: dict) -> str | None:
     if not matches:
         return None
     m = rng.choice(matches)
-    return src[:m.start()] + f"{m.group(1)}({m.group(2)} | 0)" + src[m.end():]
+    return src[: m.start()] + f"{m.group(1)}({m.group(2)} | 0)" + src[m.end() :]
 
 
 def op_void_dead(src: str, rng: random.Random, ctx: dict) -> str | None:
@@ -984,9 +1044,8 @@ def op_extra_property(src: str, rng: random.Random, ctx: dict) -> str | None:
     if not matches:
         return None
     m = rng.choice(matches)
-    obj = ("{" + m.group(1) + f"{m.group(2)}: {m.group(3)}, __dgf: 0" +
-           m.group(4) + "}")
-    return src[:m.start()] + obj + src[m.end():]
+    obj = "{" + m.group(1) + f"{m.group(2)}: {m.group(3)}, __dgf: 0" + m.group(4) + "}"
+    return src[: m.start()] + obj + src[m.end() :]
 
 
 OPS = [
@@ -1009,16 +1068,17 @@ def mutate_context(src: str) -> dict:
     functions = re.findall(r"^\s*function\s+(\w+)", src, re.M)
     arrows = re.findall(
         r"^\s*(?:const|let|var)\s+(\w+)\s*=\s*"
-        r"(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>", src, re.M)
+        r"(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>",
+        src,
+        re.M,
+    )
     arities = {}
-    for m in re.finditer(r"^\s*function\s+(\w+)\s*\(([^)]*)\)",
-                         src, re.M):
+    for m in re.finditer(r"^\s*function\s+(\w+)\s*\(([^)]*)\)", src, re.M):
         arities[m.group(1)] = _count_args(m.group(2))
     return {"functions": functions, "arrows": arrows, "arities": arities}
 
 
-def mutate_source(src: str, rng: random.Random,
-                  num_ops: int) -> tuple[str, list[str]]:
+def mutate_source(src: str, rng: random.Random, num_ops: int) -> tuple[str, list[str]]:
     """Applies up to num_ops distinct mutators. Returns (source, applied)."""
     ctx = mutate_context(src)
     ops = list(OPS)
@@ -1073,6 +1133,7 @@ GRAPH_NODE_RE = re.compile(r"^\s*\d+(?:/\d+)?:\s+([A-Za-z][A-Za-z0-9_]*)")
 
 def render_template(source: str, values: dict) -> str:
     """Substitutes {{SLOT}} markers; an unset slot is an error, not a guess."""
+
     def replace(match: re.Match) -> str:
         name = match.group(1)
         if name not in values:
@@ -1085,6 +1146,7 @@ def render_template(source: str, values: dict) -> str:
 @dataclasses.dataclass
 class Signature:
     """Coarse path signature of one Maglev compilation."""
+
     digest: str
     opcodes: dict[str, int]
     inlines: int
@@ -1115,8 +1177,7 @@ def coverage_signature(output: str) -> Signature:
         if match:
             opcodes[match.group(1)] += 1
     key = json.dumps([sorted(opcodes.items()), inlines])
-    return Signature(hashlib.sha1(key.encode()).hexdigest()[:16], opcodes,
-                     inlines)
+    return Signature(hashlib.sha1(key.encode()).hexdigest()[:16], opcodes, inlines)
 
 
 def distance(sig: Signature, target: dict) -> int:
@@ -1145,8 +1206,10 @@ def distance(sig: Signature, target: dict) -> int:
 
 def slot_families(spec: dict) -> dict[str, list[str]]:
     """Slot name -> candidate values, in catalog order."""
-    families = {name: [str(value) for value in values]
-                for name, values in (spec.get("slots") or {}).items()}
+    families = {
+        name: [str(value) for value in values]
+        for name, values in (spec.get("slots") or {}).items()
+    }
     if not families:
         raise SystemExit("target has no 'directed.slots'")
     return families
@@ -1157,8 +1220,7 @@ def slot_key(values: dict, families: dict) -> tuple[str | None, ...]:
     return tuple(values.get(name) for name in families)
 
 
-def slot_combinations(spec: dict, rng: random.Random,
-                      iterations: int) -> list[dict]:
+def slot_combinations(spec: dict, rng: random.Random, iterations: int) -> list[dict]:
     """Draws `iterations` distinct slot combinations; all of them if fewer."""
     families = slot_families(spec)
     names = list(families)
@@ -1190,8 +1252,7 @@ def single_slot_mutations(values: dict, families: dict) -> list[dict]:
     catalog lists a slot's seed value first, so the seed itself expands into
     its own neighbourhood.
     """
-    base = {name: values.get(name, family[0])
-            for name, family in families.items()}
+    base = {name: values.get(name, family[0]) for name, family in families.items()}
     children = [dict(base)]
     for name, family in families.items():
         for value in family:
@@ -1207,35 +1268,43 @@ def cmd_direct(args, targets: list[dict]) -> int:
     if not spec:
         raise SystemExit(f"target {target['id']} has no 'directed' section")
     if args.strategy == "best-first" and "distance" not in spec:
-        raise SystemExit(f"target {target['id']} has no 'directed.distance'; "
-                         "best-first needs it to order the queue")
+        raise SystemExit(
+            f"target {target['id']} has no 'directed.distance'; "
+            "best-first needs it to order the queue"
+        )
     template = (HERE / spec["template"]).read_text()
     fixed = dict(spec.get("fixed") or {})
     rng = random.Random(args.random_seed)
     families = slot_families(spec)
-    combos = (slot_combinations(spec, rng, args.iterations)
-              if args.strategy == "random" else [])
+    combos = (
+        slot_combinations(spec, rng, args.iterations)
+        if args.strategy == "random"
+        else []
+    )
 
     outdir = Path(args.out) / target["id"]
     outdir.mkdir(parents=True, exist_ok=True)
     corpus_file = Path(args.corpus) / f"{target['id']}.json"
     corpus_file.parent.mkdir(parents=True, exist_ok=True)
-    corpus = (json.loads(corpus_file.read_text()) if corpus_file.exists()
-              else {})
-    seed_trace = run_d8(d8, seed_path(target),
-                        maglev_flags(target, args.extra_flag), args.timeout)
+    corpus = json.loads(corpus_file.read_text()) if corpus_file.exists() else {}
+    seed_trace = run_d8(
+        d8, seed_path(target), maglev_flags(target, args.extra_flag), args.timeout
+    )
     seed_signature = coverage_signature(seed_trace.output)
     seed_distance = distance(seed_signature, target)
     # The seed's own graph is the first path the corpus has seen; without it,
     # the first candidates that reproduce the seed are reported as new.
-    corpus.setdefault(seed_signature.digest, {
-        "seed": True,
-        "slots": {},
-        "inlines": seed_signature.inlines,
-        "nodes": len(seed_signature.opcodes),
-        "hits": count_hits(target, seed_trace.output),
-        "distance": seed_distance,
-    })
+    corpus.setdefault(
+        seed_signature.digest,
+        {
+            "seed": True,
+            "slots": {},
+            "inlines": seed_signature.inlines,
+            "nodes": len(seed_signature.opcodes),
+            "hits": count_hits(target, seed_trace.output),
+            "distance": seed_distance,
+        },
+    )
 
     stats = collections.Counter()
     log = open(args.log, "a") if args.log else None
@@ -1246,15 +1315,14 @@ def cmd_direct(args, targets: list[dict]) -> int:
         # Every saved candidate is self-describing: the header records the
         # slot values it rendered, which is what `minimize` is allowed to
         # move. A render without it can only be reduced as text.
-        candidate = candidate_header(target, values) + render_template(
-            template, values)
+        candidate = candidate_header(target, values) + render_template(template, values)
         label = " ".join(f"{k}={v}" for k, v in sorted(combo.items()))
         with tempfile.TemporaryDirectory(prefix="dgf-direct-") as tmp:
             testcase = Path(tmp) / f"{target['id']}-{index:04d}.js"
             testcase.write_text(candidate)
-            trace = run_d8(d8, testcase,
-                           maglev_flags(target, args.extra_flag),
-                           args.timeout)
+            trace = run_d8(
+                d8, testcase, maglev_flags(target, args.extra_flag), args.timeout
+            )
             hits = count_hits(target, trace.output)
             missing = reachability(target, trace.output)
             signature = coverage_signature(trace.output)
@@ -1262,7 +1330,8 @@ def cmd_direct(args, targets: list[dict]) -> int:
             stats[f"dist_{dist}"] += 1
             new_path = signature.digest not in corpus
             _, baseline, divergence = differential_check(
-                d8, target, testcase, args.timeout, args.extra_flag)
+                d8, target, testcase, args.timeout, args.extra_flag
+            )
             stats["candidates"] += 1
             stats["hit" if not missing else "miss"] += 1
             # Candidates print instead of asserting, so a baseline that
@@ -1273,9 +1342,11 @@ def cmd_direct(args, targets: list[dict]) -> int:
                 return dist
             # Minimize while the candidate file still exists: the reduction is
             # a report, and a report has to be the input the detector needs.
-            minimized = (minimize_candidate(testcase, target, d8, args.timeout,
-                                            args.extra_flag)
-                         if divergence else None)
+            minimized = (
+                minimize_candidate(testcase, target, d8, args.timeout, args.extra_flag)
+                if divergence
+                else None
+            )
             if new_path:
                 stats["new_paths"] += 1
                 corpus[signature.digest] = {
@@ -1295,37 +1366,45 @@ def cmd_direct(args, targets: list[dict]) -> int:
                 # listing is the search's best-first order.
                 path = outdir / f"{target['id']}-d{dist:03d}-{index:04d}.js"
                 path.write_text(candidate)
-                status = ("DIFF" if divergence else
-                          "NEW " if new_path else "...")
-                print(f"[{status}] {path.name}  {label}"
-                      + (f"  distance={dist}" if args.verbose else ""))
+                status = "DIFF" if divergence else "NEW " if new_path else "..."
+                print(
+                    f"[{status}] {path.name}  {label}"
+                    + (f"  distance={dist}" if args.verbose else "")
+                )
                 if args.verbose:
-                    print(f"        inlines={signature.inlines} "
-                          f"nodes={len(signature.opcodes)} "
-                          f"delta-vs-seed: "
-                          f"{signature.delta(seed_signature) or '-'}"
-                          + ("" if not missing
-                             else f"  missing: {', '.join(missing)}"))
+                    print(
+                        f"        inlines={signature.inlines} "
+                        f"nodes={len(signature.opcodes)} "
+                        f"delta-vs-seed: "
+                        f"{signature.delta(seed_signature) or '-'}"
+                        + ("" if not missing else f"  missing: {', '.join(missing)}")
+                    )
                 if divergence:
                     print(f"        {divergence}")
                     if minimized is not None:
-                        min_path = (outdir /
-                                    f"{target['id']}-{index:04d}-min.js")
+                        min_path = outdir / f"{target['id']}-{index:04d}-min.js"
                         min_path.write_text(minimized.source)
-                        print(f"        minimized: {min_path.name}  "
-                              f"{minimized.summary()}")
+                        print(
+                            f"        minimized: {min_path.name}  {minimized.summary()}"
+                        )
         if log:
-            log.write(json.dumps({
-                "target": target["id"],
-                "slots": values,
-                "signature": signature.digest,
-                "distance": dist,
-                "new_path": new_path,
-                "missing": missing,
-                "divergence": divergence,
-                "minimized_lines": (minimized.lines_after
-                                    if minimized is not None else None),
-            }) + "\n")
+            log.write(
+                json.dumps(
+                    {
+                        "target": target["id"],
+                        "slots": values,
+                        "signature": signature.digest,
+                        "distance": dist,
+                        "new_path": new_path,
+                        "missing": missing,
+                        "divergence": divergence,
+                        "minimized_lines": (
+                            minimized.lines_after if minimized is not None else None
+                        ),
+                    }
+                )
+                + "\n"
+            )
             log.flush()
         return dist
 
@@ -1343,11 +1422,12 @@ def cmd_direct(args, targets: list[dict]) -> int:
             while queue and stats["expansions"] < args.iterations:
                 dist, _, values = heapq.heappop(queue)
                 stats["expansions"] += 1
-                where = ("seed" if not values else
-                         " ".join(f"{k}={v}"
-                                  for k, v in sorted(values.items())))
-                print(f"[exp ] #{stats['expansions']:02d} distance={dist}"
-                      f"  {where}")
+                where = (
+                    "seed"
+                    if not values
+                    else " ".join(f"{k}={v}" for k, v in sorted(values.items()))
+                )
+                print(f"[exp ] #{stats['expansions']:02d} distance={dist}  {where}")
                 if dist == 0:
                     break
                 for child in single_slot_mutations(values, families):
@@ -1356,8 +1436,7 @@ def cmd_direct(args, targets: list[dict]) -> int:
                         continue
                     seen.add(key)
                     index += 1
-                    heapq.heappush(queue, (evaluate(child, index),
-                                            next(order), child))
+                    heapq.heappush(queue, (evaluate(child, index), next(order), child))
         else:
             for index, combo in enumerate(combos):
                 evaluate(combo, index)
@@ -1366,19 +1445,25 @@ def cmd_direct(args, targets: list[dict]) -> int:
             log.close()
 
     corpus_file.write_text(json.dumps(corpus, indent=1, sort_keys=True) + "\n")
-    print(f"\ntarget={target['id']} strategy={args.strategy} "
-          f"candidates={stats['candidates']} "
-          f"hit={stats['hit']} miss={stats['miss']} "
-          f"new_paths={stats['new_paths']} "
-          f"divergences={stats['divergences']} "
-          f"expansions={stats['expansions']} "
-          f"corpus={len(corpus)} ({corpus_file})")
-    histogram = sorted((int(key[len("dist_"):]), count)
-                       for key, count in stats.items()
-                       if key.startswith("dist_"))
+    print(
+        f"\ntarget={target['id']} strategy={args.strategy} "
+        f"candidates={stats['candidates']} "
+        f"hit={stats['hit']} miss={stats['miss']} "
+        f"new_paths={stats['new_paths']} "
+        f"divergences={stats['divergences']} "
+        f"expansions={stats['expansions']} "
+        f"corpus={len(corpus)} ({corpus_file})"
+    )
+    histogram = sorted(
+        (int(key[len("dist_") :]), count)
+        for key, count in stats.items()
+        if key.startswith("dist_")
+    )
     if histogram:
-        print(f"distance (seed={seed_distance}): "
-              + " ".join(f"{dist}={count}" for dist, count in histogram))
+        print(
+            f"distance (seed={seed_distance}): "
+            + " ".join(f"{dist}={count}" for dist, count in histogram)
+        )
     return 1 if stats["divergences"] else 0
 
 
@@ -1398,8 +1483,7 @@ def cmd_direct(args, targets: list[dict]) -> int:
 # otherwise indistinguishable from a hand-written test, and the slot values
 # are exactly the facts a reduction is allowed to move.
 CANDIDATE_HEADER = "// dgf-candidate: "
-HEADER_RE = re.compile(
-    r"^" + re.escape(CANDIDATE_HEADER) + r"(\{.*\})$", re.M)
+HEADER_RE = re.compile(r"^" + re.escape(CANDIDATE_HEADER) + r"(\{.*\})$", re.M)
 
 # A JavaScript numeric literal: `1`, `-0.0`, `1e0`, `.5`.
 NUMBER_RE = re.compile(r"-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?")
@@ -1407,8 +1491,11 @@ NUMBER_RE = re.compile(r"-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?")
 
 def candidate_header(target: dict, values: dict) -> str:
     """The self-describing first line of a saved candidate."""
-    return CANDIDATE_HEADER + json.dumps(
-        {"target": target["id"], "slots": values}, sort_keys=True) + "\n"
+    return (
+        CANDIDATE_HEADER
+        + json.dumps({"target": target["id"], "slots": values}, sort_keys=True)
+        + "\n"
+    )
 
 
 def candidate_values(source: str) -> dict[str, str]:
@@ -1420,8 +1507,9 @@ def candidate_values(source: str) -> dict[str, str]:
         header = json.loads(match.group(1))
     except json.JSONDecodeError:
         return {}
-    return {str(name): str(value)
-            for name, value in (header.get("slots") or {}).items()}
+    return {
+        str(name): str(value) for name, value in (header.get("slots") or {}).items()
+    }
 
 
 def is_number(value: str) -> bool:
@@ -1447,16 +1535,19 @@ def compact_source(source: str) -> str:
     those would need a JavaScript lexer.
     """
     keep = (CANDIDATE_HEADER.strip(), "// Flags:")
-    lines = [line.rstrip() for line in source.splitlines()
-             if line.strip() and
-             (not line.lstrip().startswith("//") or
-              line.lstrip().startswith(keep))]
+    lines = [
+        line.rstrip()
+        for line in source.splitlines()
+        if line.strip()
+        and (not line.lstrip().startswith("//") or line.lstrip().startswith(keep))
+    ]
     return "\n".join(lines) + "\n"
 
 
 @dataclasses.dataclass
 class Minimized:
     """A reduced candidate that still diverges, and what it needed."""
+
     source: str
     lines_before: int
     lines_after: int
@@ -1464,12 +1555,18 @@ class Minimized:
     changes: list[str]
 
     def summary(self) -> str:
-        return (f"{self.lines_before} -> {self.lines_after} lines; " +
-                (", ".join(self.changes) or "no slot change"))
+        return f"{self.lines_before} -> {self.lines_after} lines; " + (
+            ", ".join(self.changes) or "no slot change"
+        )
 
 
-def minimize_candidate(testcase: Path, target: dict, d8: Path, timeout: float,
-                       extra_flags: Sequence[str] = ()) -> Minimized | None:
+def minimize_candidate(
+    testcase: Path,
+    target: dict,
+    d8: Path,
+    timeout: float,
+    extra_flags: Sequence[str] = (),
+) -> Minimized | None:
     """Reduces a diverging candidate to the facts the detector needs.
 
     Step 1 renders the template with the slot values the candidate recorded,
@@ -1493,8 +1590,10 @@ def minimize_candidate(testcase: Path, target: dict, d8: Path, timeout: float,
     template = None
     if recorded:
         if not spec.get("template"):
-            raise SystemExit(f"{testcase}: records slot values, but target "
-                             f"{target['id']} has no 'directed.template'")
+            raise SystemExit(
+                f"{testcase}: records slot values, but target "
+                f"{target['id']} has no 'directed.template'"
+            )
         template = (HERE / spec["template"]).read_text()
         families = slot_families(spec)
 
@@ -1502,7 +1601,8 @@ def minimize_candidate(testcase: Path, target: dict, d8: Path, timeout: float,
         if template is None:
             return original
         return candidate_header(target, values) + render_template(
-            template, {**fixed, **values})
+            template, {**fixed, **values}
+        )
 
     answers: dict[str, bool] = {}
 
@@ -1513,7 +1613,8 @@ def minimize_candidate(testcase: Path, target: dict, d8: Path, timeout: float,
                 trial = Path(tmp) / testcase.name
                 trial.write_text(source)
                 _, _, divergence = differential_check(
-                    d8, target, trial, timeout, extra_flags)
+                    d8, target, trial, timeout, extra_flags
+                )
                 answers[source] = divergence is not None
         return answers[source]
 
@@ -1521,8 +1622,7 @@ def minimize_candidate(testcase: Path, target: dict, d8: Path, timeout: float,
         return None
 
     changes: list[str] = []
-    current = {name: recorded.get(name, family[0])
-               for name, family in families.items()}
+    current = {name: recorded.get(name, family[0]) for name, family in families.items()}
 
     def try_value(name: str, value: str, why: str) -> None:
         """Keeps a reduction only if the detector fires without the fact."""
@@ -1588,10 +1688,16 @@ def minimize_candidate(testcase: Path, target: dict, d8: Path, timeout: float,
 ASSERT_TYPE_MARKER = "CheckMaglevType failed"
 
 
-def assert_types_result(d8: Path, target: dict, testcase: Path, timeout: float,
-                        extra_flags: Sequence[str] = ()) -> D8Result:
+def assert_types_result(
+    d8: Path,
+    target: dict,
+    testcase: Path,
+    timeout: float,
+    extra_flags: Sequence[str] = (),
+) -> D8Result:
     flags = maglev_flags(
-        target, list(extra_flags) + ["--maglev-assert-types"], trace=False)
+        target, list(extra_flags) + ["--maglev-assert-types"], trace=False
+    )
     return run_d8(d8, testcase, flags, timeout)
 
 
@@ -1599,8 +1705,9 @@ def fires(result: D8Result) -> bool:
     """True when a detector observed a violation, not merely a bad exit."""
     if result.timed_out:
         return False
-    return (result.crashed or result.returncode > 0 or
-            ASSERT_TYPE_MARKER in result.output)
+    return (
+        result.crashed or result.returncode > 0 or ASSERT_TYPE_MARKER in result.output
+    )
 
 
 @dataclasses.dataclass
@@ -1660,8 +1767,9 @@ def bug_class_keywords(target: dict) -> list[str]:
         for word in SYMBOL_TOKEN_RE.findall(bug_class):
             if len(word) < 4 or word in keywords:
                 continue
-            if (INTERNAL_CAPITAL_RE.search(word[1:]) or
-                    INTERNAL_UNDERSCORE_RE.search(word)):
+            if INTERNAL_CAPITAL_RE.search(word[1:]) or INTERNAL_UNDERSCORE_RE.search(
+                word
+            ):
                 keywords.append(word)
     return keywords
 
@@ -1685,9 +1793,14 @@ def _crash_mentions_target(target: dict, result: D8Result) -> bool:
     return any(keyword in output for keyword in bug_class_keywords(target))
 
 
-def verify_candidate(target: dict, d8: Path, canary: Path | None,
-                     testcase: Path, timeout: float,
-                     extra_flags: Sequence[str] = ()) -> Verdict:
+def verify_candidate(
+    target: dict,
+    d8: Path,
+    canary: Path | None,
+    testcase: Path,
+    timeout: float,
+    extra_flags: Sequence[str] = (),
+) -> Verdict:
     trace = run_d8(d8, testcase, maglev_flags(target, extra_flags), timeout)
     missing = reachability(target, trace.output)
     # Two witnesses of reachability, and both have to be about *this* target:
@@ -1700,19 +1813,21 @@ def verify_candidate(target: dict, d8: Path, canary: Path | None,
     else:
         reached_by = "none"
     reached = reached_by != "none"
-    _, _, divergence = differential_check(d8, target, testcase, timeout,
-                                          extra_flags)
+    _, _, divergence = differential_check(d8, target, testcase, timeout, extra_flags)
     assert_fires = fires(
-        assert_types_result(d8, target, testcase, timeout, extra_flags))
+        assert_types_result(d8, target, testcase, timeout, extra_flags)
+    )
     clean_fires = divergence is not None or assert_fires
 
     canary_divergence = None
     canary_assert_fires = False
     if canary is not None:
-        _, _, canary_divergence = differential_check(canary, target, testcase,
-                                                     timeout, extra_flags)
-        canary_assert_fires = fires(assert_types_result(
-            canary, target, testcase, timeout, extra_flags))
+        _, _, canary_divergence = differential_check(
+            canary, target, testcase, timeout, extra_flags
+        )
+        canary_assert_fires = fires(
+            assert_types_result(canary, target, testcase, timeout, extra_flags)
+        )
     canary_fires = canary_divergence is not None or canary_assert_fires
 
     return Verdict(
@@ -1737,8 +1852,7 @@ def print_verdict(verdict: Verdict, verbose: bool = False) -> None:
         "assert-types=" + ("FIRES" if verdict.assert_fires else "-"),
     ]
     if verdict.canary:
-        canary_fires = bool(verdict.canary_divergence or
-                            verdict.canary_assert_fires)
+        canary_fires = bool(verdict.canary_divergence or verdict.canary_assert_fires)
         detectors.append("canary=" + ("FIRES" if canary_fires else "-"))
     print("        " + " ".join(detectors))
     if verdict.missing:
@@ -1759,8 +1873,11 @@ def cmd_verify(args, targets: list[dict]) -> int:
     if args.canary_d8:
         canary = require_d8(Path(args.canary_d8))
         if not Path(str(canary) + ".json").exists():
-            print(f"warning: {canary} has no {Path(str(canary)).name}.json; "
-                  f"build it with `dgf.py canary --fault ID`", file=sys.stderr)
+            print(
+                f"warning: {canary} has no {Path(str(canary)).name}.json; "
+                f"build it with `dgf.py canary --fault ID`",
+                file=sys.stderr,
+            )
 
     known = {target["id"]: target for target in targets}
     jobs: list[tuple[dict, Path]] = []
@@ -1769,18 +1886,19 @@ def cmd_verify(args, targets: list[dict]) -> int:
             jobs.append((known[item], seed_path(known[item])))
         elif args.target:
             # Resolve: d8 runs with cwd set to the testcase's directory.
-            jobs.append((find_target(targets, args.target),
-                         Path(item).expanduser().resolve()))
+            jobs.append(
+                (find_target(targets, args.target), Path(item).expanduser().resolve())
+            )
         else:
-            raise SystemExit(
-                f"{item}: not a target id; pass --target to verify a file")
+            raise SystemExit(f"{item}: not a target id; pass --target to verify a file")
 
     verdicts = []
     for target, testcase in jobs:
         if not testcase.exists():
             raise SystemExit(f"missing candidate {testcase}")
-        verdict = verify_candidate(target, d8, canary, testcase, args.timeout,
-                                   args.extra_flag)
+        verdict = verify_candidate(
+            target, d8, canary, testcase, args.timeout, args.extra_flag
+        )
         verdicts.append(verdict)
         if not args.json:
             print_verdict(verdict, verbose=args.verbose)
@@ -1788,18 +1906,18 @@ def cmd_verify(args, targets: list[dict]) -> int:
     if args.json:
         print(json.dumps([v.to_json() for v in verdicts], indent=1))
     counts = collections.Counter(v.verdict for v in verdicts)
-    summary = ", ".join(f"{name}={count}" for name, count in
-                        sorted(counts.items()))
+    summary = ", ".join(f"{name}={count}" for name, count in sorted(counts.items()))
     # Keep stdout parseable in --json mode: the summary goes to stderr.
-    print(f"\n{len(verdicts)} candidate(s): {summary}",
-          file=sys.stderr if args.json else sys.stdout)
+    print(
+        f"\n{len(verdicts)} candidate(s): {summary}",
+        file=sys.stderr if args.json else sys.stdout,
+    )
     return 1 if counts.get("candidate") else 0
 
 
 def git_apply(patch: Path, reverse: bool) -> None:
     cmd = ["git", "apply", "-p1"] + (["-R"] if reverse else []) + [str(patch)]
-    proc = subprocess.run(cmd, cwd=str(V8_ROOT), capture_output=True,
-                          text=True)
+    proc = subprocess.run(cmd, cwd=str(V8_ROOT), capture_output=True, text=True)
     if proc.returncode != 0:
         raise SystemExit(f"{' '.join(cmd)}\n{proc.stderr.strip()}")
 
@@ -1809,9 +1927,11 @@ def cmd_canary(args, targets: list[dict]) -> int:
     if args.list:
         width = max(len(f["id"]) for f in faults)
         for fault in faults:
-            print(f"{fault['id']:<{width}}  {fault['channel']:<38}  "
-                  f"{fault['summary']}"
-                  + ("" if fault.get("validated") else "  [not built yet]"))
+            print(
+                f"{fault['id']:<{width}}  {fault['channel']:<38}  "
+                f"{fault['summary']}"
+                + ("" if fault.get("validated") else "  [not built yet]")
+            )
         return 0
     if not args.fault:
         raise SystemExit("pass --fault ID (or --list)")
@@ -1821,15 +1941,16 @@ def cmd_canary(args, targets: list[dict]) -> int:
 
     patch = HERE / fault["patch"]
     config = Path(args.config)
-    install = (Path(args.install) if args.install
-               else config / "d8.dgf-canary")
+    install = Path(args.install) if args.install else config / "d8.dgf-canary"
     clean_copy = config / "d8.dgf-clean"
     print(f"[canary] {fault['id']}: {fault['summary']}")
 
     if args.revert:
         git_apply(patch, reverse=True)
-        print(f"[canary] reverted {patch.name}; rebuild with "
-              f"{args.builder} -C {config} d8")
+        print(
+            f"[canary] reverted {patch.name}; rebuild with "
+            f"{args.builder} -C {config} d8"
+        )
         return 0
 
     # Keep a clean reference binary: `verify --d8 <clean> --canary-d8 <canary>`
@@ -1844,22 +1965,34 @@ def cmd_canary(args, targets: list[dict]) -> int:
         return 0
 
     print(f"[canary] building d8 in {config} (this is a real build)")
-    if subprocess.run([args.builder, "-C", str(config), "d8"],
-                      cwd=str(V8_ROOT)).returncode != 0:
-        print("[canary] build failed; the patch is still applied "
-              f"(revert with: dgf.py canary --fault {fault['id']} --revert)",
-              file=sys.stderr)
+    if (
+        subprocess.run(
+            [args.builder, "-C", str(config), "d8"], cwd=str(V8_ROOT)
+        ).returncode
+        != 0
+    ):
+        print(
+            "[canary] build failed; the patch is still applied "
+            f"(revert with: dgf.py canary --fault {fault['id']} --revert)",
+            file=sys.stderr,
+        )
         return 1
 
     shutil.copy2(config / "d8", install)
     meta = Path(str(install) + ".json")
-    meta.write_text(json.dumps({
-        "fault": fault["id"],
-        "patch": fault["patch"],
-        "config": str(config),
-        "validated": fault.get("validated", False),
-        "built_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-    }, indent=1) + "\n")
+    meta.write_text(
+        json.dumps(
+            {
+                "fault": fault["id"],
+                "patch": fault["patch"],
+                "config": str(config),
+                "validated": fault.get("validated", False),
+                "built_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            },
+            indent=1,
+        )
+        + "\n"
+    )
     print(f"[canary] installed {install} (+ {meta.name})")
 
     if args.keep_source:
@@ -1868,8 +2001,12 @@ def cmd_canary(args, targets: list[dict]) -> int:
     print(f"[canary] reverting {patch.name}")
     git_apply(patch, reverse=True)
     print(f"[canary] rebuilding the clean d8")
-    if subprocess.run([args.builder, "-C", str(config), "d8"],
-                      cwd=str(V8_ROOT)).returncode != 0:
+    if (
+        subprocess.run(
+            [args.builder, "-C", str(config), "d8"], cwd=str(V8_ROOT)
+        ).returncode
+        != 0
+    ):
         return 1
     return 0
 
@@ -1904,6 +2041,7 @@ BENCH_METRICS = (
 @dataclasses.dataclass
 class BenchArm:
     """One search arm's numbers, all counted by bench_arm()."""
+
     name: str
     candidates: int = 0
     new_paths: int = 0
@@ -1918,10 +2056,17 @@ class BenchArm:
         }
 
 
-def bench_arm(name: str, target: dict, d8: Path, timeout: float,
-              sources: Iterable[str], seed_digest: str, seed_distance: int,
-              extra_flags: Sequence[str] = (),
-              verbose: bool = False) -> BenchArm:
+def bench_arm(
+    name: str,
+    target: dict,
+    d8: Path,
+    timeout: float,
+    sources: Iterable[str],
+    seed_digest: str,
+    seed_distance: int,
+    extra_flags: Sequence[str] = (),
+    verbose: bool = False,
+) -> BenchArm:
     """Compiles every candidate of one arm and tallies what it found.
 
     A candidate is a *new signature* when its graph signature is neither the
@@ -1937,12 +2082,12 @@ def bench_arm(name: str, target: dict, d8: Path, timeout: float,
         with tempfile.TemporaryDirectory(prefix="dgf-bench-") as tmp:
             testcase = Path(tmp) / f"{target['id']}-{index:04d}.js"
             testcase.write_text(source)
-            trace = run_d8(d8, testcase,
-                           maglev_flags(target, extra_flags), timeout)
+            trace = run_d8(d8, testcase, maglev_flags(target, extra_flags), timeout)
             signature = coverage_signature(trace.output)
             dist = distance(signature, target)
             _, baseline, divergence = differential_check(
-                d8, target, testcase, timeout, extra_flags)
+                d8, target, testcase, timeout, extra_flags
+            )
         arm.candidates += 1
         # Same order as `direct`: a candidate whose baseline run moved the
         # expected value says nothing about the target's graph.
@@ -1961,14 +2106,17 @@ def bench_arm(name: str, target: dict, d8: Path, timeout: float,
         if divergence:
             arm.divergences += 1
         if verbose:
-            print(f"[{name}] #{index:02d} distance={dist} "
-                  f"new={int(new_path)} improved={int(improved)}" +
-                  (f"  {divergence}" if divergence else ""))
+            print(
+                f"[{name}] #{index:02d} distance={dist} "
+                f"new={int(new_path)} improved={int(improved)}"
+                + (f"  {divergence}" if divergence else "")
+            )
     return arm
 
 
-def bench_mutants(base: str, rng: random.Random, iterations: int,
-                  max_mutations: int) -> list[str]:
+def bench_mutants(
+    base: str, rng: random.Random, iterations: int, max_mutations: int
+) -> list[str]:
     """`iterations` structural mutants, drawn the way `fuzz` draws them.
 
     `fuzz` skips a try whose mutators all declined; the baseline arm draws
@@ -1986,8 +2134,9 @@ def bench_mutants(base: str, rng: random.Random, iterations: int,
     return mutants
 
 
-def bench_comparison(direct: BenchArm, baseline: BenchArm
-                     ) -> list[tuple[str, str, int, int, str]]:
+def bench_comparison(
+    direct: BenchArm, baseline: BenchArm
+) -> list[tuple[str, str, int, int, str]]:
     """(metric, label, direct, baseline, better) for every metric."""
     rows = []
     for key, label, lower_is_better in BENCH_METRICS:
@@ -2002,9 +2151,9 @@ def bench_comparison(direct: BenchArm, baseline: BenchArm
     return rows
 
 
-def bench_outcome(rows: list[tuple[str, str, int, int, str]],
-                  direct: BenchArm,
-                  baseline: BenchArm) -> tuple[str, list[str], list[str]]:
+def bench_outcome(
+    rows: list[tuple[str, str, int, int, str]], direct: BenchArm, baseline: BenchArm
+) -> tuple[str, list[str], list[str]]:
     """(outcome, metrics `direct` won, metrics the baseline won).
 
     `bench` exits non-zero only when the baseline wins outright, so the
@@ -2029,17 +2178,20 @@ def cmd_bench(args, targets: list[dict]) -> int:
     target = find_target(targets, args.target)
     spec = target.get("directed")
     if not spec:
-        raise SystemExit(f"target {target['id']} has no 'directed' section; "
-                         "there is nothing directed to compare")
+        raise SystemExit(
+            f"target {target['id']} has no 'directed' section; "
+            "there is nothing directed to compare"
+        )
     if "distance" not in spec:
-        raise SystemExit(f"target {target['id']} has no 'directed.distance'; "
-                         "every candidate is scored with it")
+        raise SystemExit(
+            f"target {target['id']} has no 'directed.distance'; "
+            "every candidate is scored with it"
+        )
     template = (HERE / spec["template"]).read_text()
     fixed = dict(spec.get("fixed") or {})
     seed = seed_path(target)
     base = seed.read_text()
-    seed_trace = run_d8(d8, seed, maglev_flags(target, args.extra_flag),
-                        args.timeout)
+    seed_trace = run_d8(d8, seed, maglev_flags(target, args.extra_flag), args.timeout)
     seed_signature = coverage_signature(seed_trace.output)
     seed_distance = distance(seed_signature, target)
 
@@ -2047,23 +2199,41 @@ def cmd_bench(args, targets: list[dict]) -> int:
     # consumed, and the same --random-seed repeats the whole comparison.
     direct_rng = random.Random(f"direct:{args.random_seed}")
     baseline_rng = random.Random(f"baseline:{args.random_seed}")
-    values = [{**fixed, **combo}
-              for combo in slot_combinations(spec, direct_rng,
-                                              args.iterations)]
+    values = [
+        {**fixed, **combo}
+        for combo in slot_combinations(spec, direct_rng, args.iterations)
+    ]
     direct_sources = [
         candidate_header(target, value) + render_template(template, value)
         for value in values
     ]
     # The baseline sees the same seed with the slots left alone.
-    baseline_sources = bench_mutants(base, baseline_rng, args.iterations,
-                                     args.max_mutations)
+    baseline_sources = bench_mutants(
+        base, baseline_rng, args.iterations, args.max_mutations
+    )
 
-    direct = bench_arm("direct", target, d8, args.timeout, direct_sources,
-                       seed_signature.digest, seed_distance, args.extra_flag,
-                       args.verbose)
-    baseline = bench_arm(args.baseline, target, d8, args.timeout,
-                         baseline_sources, seed_signature.digest,
-                         seed_distance, args.extra_flag, args.verbose)
+    direct = bench_arm(
+        "direct",
+        target,
+        d8,
+        args.timeout,
+        direct_sources,
+        seed_signature.digest,
+        seed_distance,
+        args.extra_flag,
+        args.verbose,
+    )
+    baseline = bench_arm(
+        args.baseline,
+        target,
+        d8,
+        args.timeout,
+        baseline_sources,
+        seed_signature.digest,
+        seed_distance,
+        args.extra_flag,
+        args.verbose,
+    )
     rows = bench_comparison(direct, baseline)
     outcome, wins, losses = bench_outcome(rows, direct, baseline)
     record = {
@@ -2085,38 +2255,51 @@ def cmd_bench(args, targets: list[dict]) -> int:
         print(json.dumps(record, indent=1, sort_keys=True))
         return 1 if outcome == "baseline" else 0
 
-    print(f"bench: target={target['id']} iterations={args.iterations} "
-          f"seed={seed.name} seed_distance={seed_distance} "
-          f"random_seed={args.random_seed}")
-    print(f"       baseline={baseline.name} candidates: "
-          f"direct={direct.candidates} {baseline.name}={baseline.candidates}")
+    print(
+        f"bench: target={target['id']} iterations={args.iterations} "
+        f"seed={seed.name} seed_distance={seed_distance} "
+        f"random_seed={args.random_seed}"
+    )
+    print(
+        f"       baseline={baseline.name} candidates: "
+        f"direct={direct.candidates} {baseline.name}={baseline.candidates}"
+    )
     if direct.candidates != baseline.candidates:
-        print(f"       note: the arms ran different candidate counts "
-              f"({direct.name}={direct.candidates}, "
-              f"{baseline.name}={baseline.candidates})")
+        print(
+            f"       note: the arms ran different candidate counts "
+            f"({direct.name}={direct.candidates}, "
+            f"{baseline.name}={baseline.candidates})"
+        )
     print()
-    print(f"  {'metric':<20}{direct.name:>9}{baseline.name:>21}"
-          f"{'better':>10}")
+    print(f"  {'metric':<20}{direct.name:>9}{baseline.name:>21}{'better':>10}")
     for _, label, mine, theirs, better in rows:
         print(f"  {label:<20}{mine:>9}{theirs:>21}{better:>10}")
     if outcome == "direct":
         print(f"\noutcome: direct  (better on {', '.join(wins)})")
     elif outcome == "mixed":
-        print(f"\noutcome: mixed  (direct better on {', '.join(wins)}; "
-              f"baseline better on {', '.join(losses)})")
+        print(
+            f"\noutcome: mixed  (direct better on {', '.join(wins)}; "
+            f"baseline better on {', '.join(losses)})"
+        )
     elif outcome == "tie":
         print("\noutcome: tie  (every metric equal)")
-        print("        warning: this budget does not separate the arms; "
-              "raise --iterations")
+        print(
+            "        warning: this budget does not separate the arms; "
+            "raise --iterations"
+        )
     else:
         print(f"\noutcome: baseline  (better on {', '.join(losses)})")
     if direct.improved > baseline.improved:
-        print(f"        distance: {direct.improved} vs {baseline.improved} "
-              "improving candidates")
+        print(
+            f"        distance: {direct.improved} vs {baseline.improved} "
+            "improving candidates"
+        )
     else:
-        print(f"        warning: direct did not produce more "
-              f"distance-improving candidates "
-              f"({direct.improved} vs {baseline.improved})")
+        print(
+            f"        warning: direct did not produce more "
+            f"distance-improving candidates "
+            f"({direct.improved} vs {baseline.improved})"
+        )
     return 1 if outcome == "baseline" else 0
 
 
@@ -2140,8 +2323,10 @@ def cmd_targets(args, targets: list[dict]) -> int:
     width = max(len(t["id"]) for t in targets)
     for target in targets:
         flags = " ".join(target.get("trace_flags") or []) or "-"
-        print(f"{target['id']:<{width}}  {target['subsystem']:<20}  "
-              f"{target['seed']:<38}  {flags}")
+        print(
+            f"{target['id']:<{width}}  {target['subsystem']:<20}  "
+            f"{target['seed']:<38}  {flags}"
+        )
     return 0
 
 
@@ -2165,12 +2350,12 @@ def cmd_check(args, targets: list[dict]) -> int:
         print(json.dumps([r.to_json() for r in reports], indent=1))
     failed = [r for r in reports if not r.ok]
     # Keep stdout parseable in --json mode: the summary goes to stderr.
-    summary = (f"\n{len(reports) - len(failed)}/{len(reports)} targets reached "
-               f"without divergence")
+    summary = (
+        f"\n{len(reports) - len(failed)}/{len(reports)} targets reached "
+        f"without divergence"
+    )
     print(summary, file=sys.stderr if args.json else sys.stdout)
     return 0 if not failed else 1
-
-
 
 
 def cmd_fuzz(args, targets: list[dict]) -> int:
@@ -2203,21 +2388,26 @@ def cmd_fuzz(args, targets: list[dict]) -> int:
             with tempfile.TemporaryDirectory(prefix="dgf-") as tmp:
                 testcase = Path(tmp) / f"{seed.stem}_{i:04d}.js"
                 testcase.write_text(src)
-                report = check_target(d8, target, args.timeout,
-                                      differential=True, testcase=testcase)
+                report = check_target(
+                    d8, target, args.timeout, differential=True, testcase=testcase
+                )
                 # A mutant that breaks the seed's own value check invalidates
                 # the oracle for this input (the expected value moved, not the
                 # compiler), so it is not counted as a divergence.
-                if (report.baseline is None
-                        or report.baseline.self_check_failed
-                        or report.baseline.crashed):
+                if (
+                    report.baseline is None
+                    or report.baseline.self_check_failed
+                    or report.baseline.crashed
+                ):
                     stats["seed_broken"] += 1
                     continue
                 # The report is minimized while its file still exists: a saved
                 # mutant is a full seed, and only some of it is the bug.
-                minimized = (minimize_candidate(testcase, target, d8,
-                                                args.timeout)
-                             if report.divergence else None)
+                minimized = (
+                    minimize_candidate(testcase, target, d8, args.timeout)
+                    if report.divergence
+                    else None
+                )
             if report.hit:
                 stats["hit"] += 1
             else:
@@ -2244,10 +2434,12 @@ def cmd_fuzz(args, targets: list[dict]) -> int:
         if log:
             log.close()
 
-    print(f"\ntarget={target['id']} seed={seed.name} "
-          f"mutants={stats['mutants']} hit={stats['hit']} "
-          f"miss={stats['miss']} seed_broken={stats['seed_broken']} "
-          f"divergences={stats['divergence']}")
+    print(
+        f"\ntarget={target['id']} seed={seed.name} "
+        f"mutants={stats['mutants']} hit={stats['hit']} "
+        f"miss={stats['miss']} seed_broken={stats['seed_broken']} "
+        f"divergences={stats['divergence']}"
+    )
     return 1 if divergences else 0
 
 
@@ -2257,11 +2449,11 @@ def cmd_minimize(args, targets: list[dict]) -> int:
     path = Path(args.file).expanduser().resolve()
     if not path.exists():
         raise SystemExit(f"missing candidate {path}")
-    minimized = minimize_candidate(path, target, d8, args.timeout,
-                                   args.extra_flag)
+    minimized = minimize_candidate(path, target, d8, args.timeout, args.extra_flag)
     if minimized is None:
-        print(f"[MIN ] {path.name}: no longer diverges; the candidate was "
-              f"minimized away")
+        print(
+            f"[MIN ] {path.name}: no longer diverges; the candidate was minimized away"
+        )
         return 1
     out = path.with_suffix(".min.js")
     out.write_text(minimized.source)
@@ -2272,128 +2464,217 @@ def cmd_minimize(args, targets: list[dict]) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--targets", default=str(DEFAULT_TARGETS),
-                        help="target catalog (default: %(default)s)")
-    common.add_argument("--d8", default=None,
-                        help="d8 binary (default: newest fuzzing build)")
-    common.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
-                        help="per-run timeout in seconds")
+    common.add_argument(
+        "--targets",
+        default=str(DEFAULT_TARGETS),
+        help="target catalog (default: %(default)s)",
+    )
+    common.add_argument(
+        "--d8", default=None, help="d8 binary (default: newest fuzzing build)"
+    )
+    common.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_TIMEOUT,
+        help="per-run timeout in seconds",
+    )
 
     parser = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter)
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("targets", parents=[common],
-                       help="list the target catalog")
+    p = sub.add_parser("targets", parents=[common], help="list the target catalog")
     p.add_argument("--json", action="store_true")
 
-    p = sub.add_parser("check", parents=[common],
-                       help="run seeds and assert the target is reached")
+    p = sub.add_parser(
+        "check", parents=[common], help="run seeds and assert the target is reached"
+    )
     p.add_argument("ids", nargs="*", help="target ids (default: all)")
     p.add_argument("--json", action="store_true")
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("--no-differential", action="store_true")
-    p.add_argument("--extra-flag", action="append", default=[],
-                   help="extra d8 flag, may be repeated")
+    p.add_argument(
+        "--extra-flag",
+        action="append",
+        default=[],
+        help="extra d8 flag, may be repeated",
+    )
 
-    p = sub.add_parser("fuzz", parents=[common],
-                       help="mutate a seed and diff the mutants")
+    p = sub.add_parser(
+        "fuzz", parents=[common], help="mutate a seed and diff the mutants"
+    )
     p.add_argument("--target", required=True)
     p.add_argument("--iterations", type=int, default=20)
-    p.add_argument("--max-mutations", type=int, default=2,
-                   help="upper bound on mutators per mutant")
+    p.add_argument(
+        "--max-mutations",
+        type=int,
+        default=2,
+        help="upper bound on mutators per mutant",
+    )
     p.add_argument("--random-seed", type=int, default=None)
-    p.add_argument("--seed-file", default=None,
-                   help="mutate this file instead of the target's seed")
-    p.add_argument("--out", default=str(HERE / "mutants"),
-                   help="directory for diverging mutants")
+    p.add_argument(
+        "--seed-file",
+        default=None,
+        help="mutate this file instead of the target's seed",
+    )
+    p.add_argument(
+        "--out", default=str(HERE / "mutants"), help="directory for diverging mutants"
+    )
     p.add_argument("--log", default=None, help="append JSONL results here")
-    p.add_argument("--allow-miss", dest="require_hit", action="store_false",
-                   help="also report divergences that miss the target")
+    p.add_argument(
+        "--allow-miss",
+        dest="require_hit",
+        action="store_false",
+        help="also report divergences that miss the target",
+    )
 
-    p = sub.add_parser("direct", parents=[common],
-                       help="mutate the values that control a proof")
+    p = sub.add_parser(
+        "direct", parents=[common], help="mutate the values that control a proof"
+    )
     p.add_argument("--target", required=True)
-    p.add_argument("--iterations", type=int, default=20,
-                   help="slot combinations to try (all of them if fewer), or "
-                        "expansions under --strategy=best-first")
-    p.add_argument("--strategy", choices=("random", "best-first"),
-                   default="random",
-                   help="candidate order: 'random' samples slot "
-                        "combinations, 'best-first' expands the candidate "
-                        "closest to the elision (needs directed.distance)")
+    p.add_argument(
+        "--iterations",
+        type=int,
+        default=20,
+        help="slot combinations to try (all of them if fewer), or "
+        "expansions under --strategy=best-first",
+    )
+    p.add_argument(
+        "--strategy",
+        choices=("random", "best-first"),
+        default="random",
+        help="candidate order: 'random' samples slot "
+        "combinations, 'best-first' expands the candidate "
+        "closest to the elision (needs directed.distance)",
+    )
     p.add_argument("--random-seed", type=int, default=None)
-    p.add_argument("--out", default=str(HERE / "mutants"),
-                   help="directory for new-path and diverging candidates")
-    p.add_argument("--corpus", default=str(DEFAULT_CORPUS),
-                   help="path-signature corpus (default: %(default)s)")
+    p.add_argument(
+        "--out",
+        default=str(HERE / "mutants"),
+        help="directory for new-path and diverging candidates",
+    )
+    p.add_argument(
+        "--corpus",
+        default=str(DEFAULT_CORPUS),
+        help="path-signature corpus (default: %(default)s)",
+    )
     p.add_argument("--log", default=None, help="append JSONL results here")
-    p.add_argument("--keep-all", action="store_true",
-                   help="save every candidate, not only the interesting ones")
+    p.add_argument(
+        "--keep-all",
+        action="store_true",
+        help="save every candidate, not only the interesting ones",
+    )
     p.add_argument("-v", "--verbose", action="store_true")
-    p.add_argument("--extra-flag", action="append", default=[],
-                   help="extra d8 flag, may be repeated")
+    p.add_argument(
+        "--extra-flag",
+        action="append",
+        default=[],
+        help="extra d8 flag, may be repeated",
+    )
 
-    p = sub.add_parser("bench", parents=[common],
-                       help="compare `direct` with random mutation on the "
-                            "same budget")
+    p = sub.add_parser(
+        "bench",
+        parents=[common],
+        help="compare `direct` with random mutation on the same budget",
+    )
     p.add_argument("--target", required=True)
-    p.add_argument("--iterations", type=int, default=20,
-                   help="candidates per arm")
-    p.add_argument("--baseline", default="generic-differential",
-                   choices=("generic-differential",),
-                   help="random-mutation arm to compare against: the seed, "
-                        "mutated structurally, with no reachability "
-                        "requirement (default: %(default)s)")
-    p.add_argument("--max-mutations", type=int, default=2,
-                   help="upper bound on mutators per baseline mutant")
+    p.add_argument("--iterations", type=int, default=20, help="candidates per arm")
+    p.add_argument(
+        "--baseline",
+        default="generic-differential",
+        choices=("generic-differential",),
+        help="random-mutation arm to compare against: the seed, "
+        "mutated structurally, with no reachability "
+        "requirement (default: %(default)s)",
+    )
+    p.add_argument(
+        "--max-mutations",
+        type=int,
+        default=2,
+        help="upper bound on mutators per baseline mutant",
+    )
     p.add_argument("--random-seed", type=int, default=None)
     p.add_argument("--json", action="store_true")
-    p.add_argument("-v", "--verbose", action="store_true",
-                   help="print every candidate's distance and outcome")
-    p.add_argument("--extra-flag", action="append", default=[],
-                   help="extra d8 flag, may be repeated")
+    p.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="print every candidate's distance and outcome",
+    )
+    p.add_argument(
+        "--extra-flag",
+        action="append",
+        default=[],
+        help="extra d8 flag, may be repeated",
+    )
 
-    p = sub.add_parser("minimize", parents=[common],
-                       help="shrink a diverging candidate while it still "
-                            "diverges")
+    p = sub.add_parser(
+        "minimize",
+        parents=[common],
+        help="shrink a diverging candidate while it still diverges",
+    )
     p.add_argument("file", help="candidate file, e.g. from `direct`")
-    p.add_argument("--target", required=True,
-                   help="target whose template and flags to use")
-    p.add_argument("--extra-flag", action="append", default=[],
-                   help="extra d8 flag, may be repeated")
+    p.add_argument(
+        "--target", required=True, help="target whose template and flags to use"
+    )
+    p.add_argument(
+        "--extra-flag",
+        action="append",
+        default=[],
+        help="extra d8 flag, may be repeated",
+    )
 
-    p = sub.add_parser("verify", parents=[common],
-                       help="deterministic verification of a candidate")
-    p.add_argument("items", nargs="+",
-                   help="candidate files, or target ids (their seeds)")
-    p.add_argument("--target", default=None,
-                   help="target whose trace flags to use for file arguments")
-    p.add_argument("--canary-d8", default=None,
-                   help="injected-fault build, from `canary --fault ID`")
+    p = sub.add_parser(
+        "verify", parents=[common], help="deterministic verification of a candidate"
+    )
+    p.add_argument(
+        "items", nargs="+", help="candidate files, or target ids (their seeds)"
+    )
+    p.add_argument(
+        "--target",
+        default=None,
+        help="target whose trace flags to use for file arguments",
+    )
+    p.add_argument(
+        "--canary-d8",
+        default=None,
+        help="injected-fault build, from `canary --fault ID`",
+    )
     p.add_argument("--json", action="store_true")
     p.add_argument("-v", "--verbose", action="store_true")
-    p.add_argument("--extra-flag", action="append", default=[],
-                   help="extra d8 flag, may be repeated")
+    p.add_argument(
+        "--extra-flag",
+        action="append",
+        default=[],
+        help="extra d8 flag, may be repeated",
+    )
 
-    p = sub.add_parser("canary", parents=[common],
-                       help="build a d8 with one proof trusted blindly")
+    p = sub.add_parser(
+        "canary", parents=[common], help="build a d8 with one proof trusted blindly"
+    )
     p.add_argument("--list", action="store_true")
     p.add_argument("--fault", default=None)
-    p.add_argument("--config", default="out/x64.asan-fuzz",
-                   help="build directory to patch and build "
-                        "(default: %(default)s)")
-    p.add_argument("--install", default=None,
-                   help="where to copy the canary d8 "
-                        "(default: <config>/d8.dgf-canary)")
+    p.add_argument(
+        "--config",
+        default="out/x64.asan-fuzz",
+        help="build directory to patch and build (default: %(default)s)",
+    )
+    p.add_argument(
+        "--install",
+        default=None,
+        help="where to copy the canary d8 (default: <config>/d8.dgf-canary)",
+    )
     p.add_argument("--builder", default="autoninja")
-    p.add_argument("--apply-only", action="store_true",
-                   help="apply the patch and stop")
-    p.add_argument("--keep-source", action="store_true",
-                   help="apply, build and install, but leave the patch applied")
-    p.add_argument("--revert", action="store_true",
-                   help="revert the patch of --fault and stop")
+    p.add_argument("--apply-only", action="store_true", help="apply the patch and stop")
+    p.add_argument(
+        "--keep-source",
+        action="store_true",
+        help="apply, build and install, but leave the patch applied",
+    )
+    p.add_argument(
+        "--revert", action="store_true", help="revert the patch of --fault and stop"
+    )
     return parser
 
 
@@ -2402,13 +2683,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     targets = load_targets(Path(args.targets))
     lookup_table = {
         "targets": cmd_targets,
-        "check" : cmd_check,
-        "fuzz" : cmd_fuzz,
-        "direct" : cmd_direct,
-        "bench" : cmd_bench,
-        "minimize" : cmd_minimize,
-        "verify" : cmd_verify,
-        "canary" : cmd_canary
+        "check": cmd_check,
+        "fuzz": cmd_fuzz,
+        "direct": cmd_direct,
+        "bench": cmd_bench,
+        "minimize": cmd_minimize,
+        "verify": cmd_verify,
+        "canary": cmd_canary,
     }
     if args.cmd in lookup_table:
         return lookup_table[args.cmd](args, targets)
@@ -2417,4 +2698,3 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
