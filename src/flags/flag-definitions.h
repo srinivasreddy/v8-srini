@@ -804,6 +804,11 @@ DEFINE_DEVELOPER_FLAG(trace_maglev_inlining, "trace maglev inlining")
 DEFINE_DEVELOPER_FLAG(trace_maglev_kna_processor,
                       "trace maglev known node aspects processor")
 DEFINE_DEVELOPER_FLAG(trace_maglev_scope_info, "trace maglev scope info")
+DEFINE_DEVELOPER_FLAG(
+    trace_maglev_type_confusion,
+    "trace maglev type-confusion-relevant events (map checks/inference, node "
+    "type narrowing, representation/truncation, elements-kind) for offline "
+    "analysis; lines are prefixed with [MGLV-TC]")
 DEFINE_DEVELOPER_FLAG(trace_maglev, "trace Maglev IR to JSON")
 DEFINE_STRING(trace_maglev_file_prefix, "maglev",
               "write maglev trace files with given prefix")

@@ -4,6 +4,8 @@
 
 #include "src/maglev/maglev-node-type.h"
 
+#include "src/maglev/maglev-type-confusion-tracing.h"
+
 namespace v8::internal::maglev {
 
 // Assert that the Unknown type is constructed correctly.
@@ -56,6 +58,7 @@ NodeType StaticTypeForConstant(compiler::JSHeapBroker* broker,
   }
   NodeType type = StaticTypeForMap(ref.AsHeapObject().map(broker), broker);
   DCHECK(!IsEmptyNodeType(type));
+  TRACE_TC("nodetype", "StaticTypeForConstant ref=" << ref << " -> " << type);
   return type;
 }
 
@@ -125,15 +128,25 @@ bool IsInstanceOfNodeType(compiler::MapRef map, NodeType type,
 
   // Iterate over each leaf type bit in the type bitmask, and check if the map
   // matches it.
+  bool is_instance = false;
   NodeTypeInt type_bits = static_cast<NodeTypeInt>(type);
   while (type_bits != 0) {
     NodeTypeInt current_bit =
         1 << base::bits::CountTrailingZerosNonZero(type_bits);
     NodeType leaf_type = static_cast<NodeType>(current_bit);
-    if (IsInstanceOfLeafNodeType(map, leaf_type, broker)) return true;
+    if (IsInstanceOfLeafNodeType(map, leaf_type, broker)) {
+      is_instance = true;
+      break;
+    }
     type_bits = base::bits::ClearLsb(type_bits);
   }
-  return false;
+  // A false result means this concrete map is NOT an instance of the expected
+  // node type: a place where a type assumption and the real map disagree.
+  TRACE_TC("nodetype", "IsInstanceOfNodeType map=" << map << " expected="
+                                                   << type << " -> "
+                                                   << (is_instance ? "yes"
+                                                                   : "NO"));
+  return is_instance;
 }
 
 std::ostream& operator<<(std::ostream& out, const NodeType& type) {

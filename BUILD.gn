@@ -5362,6 +5362,7 @@ v8_header_set("v8_internal_headers") {
       "src/maglev/maglev-register-frame-array.h",
       "src/maglev/maglev-tracer.h",
       "src/maglev/maglev-truncation.h",
+      "src/maglev/maglev-type-confusion-tracing.h",
       "src/maglev/maglev.h",
       "src/maglev/turbolev-escape-analysis.h",
     ]

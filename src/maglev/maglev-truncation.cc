@@ -8,6 +8,7 @@
 #include "src/maglev/maglev-ir-inl.h"
 #include "src/maglev/maglev-ir.h"
 #include "src/maglev/maglev-reducer-inl.h"
+#include "src/maglev/maglev-type-confusion-tracing.h"
 
 namespace v8::internal::maglev {
 
@@ -123,6 +124,7 @@ ValueNode* TruncationProcessor::GetTruncatedInt32Input(ValueNode* node,
 ValueNode* TruncationProcessor::GetSpeculatedTruncatedInt32Input(
     ValueNode* node, int index) {
   ValueNode* input = node->input_node(index);
+  ValueNode* original_input = input;
   if (auto f64_cst = input->TryCast<Float64Constant>()) {
     DCHECK(input->GetStaticRange().IsSafeInt());
     input = GetTruncatedInt32Constant(f64_cst->value().get_scalar());
@@ -155,6 +157,13 @@ ValueNode* TruncationProcessor::GetSpeculatedTruncatedInt32Input(
     }
   }
   DCHECK(input->is_int32());
+  if (input != original_input) {
+    TRACE_TC("repr", "speculative truncation of input "
+                         << index << " of " << PrintNodeBrief{node} << ": "
+                         << PrintNodeBrief{original_input}
+                         << " reinterpreted as int32 "
+                         << PrintNodeBrief{input});
+  }
   return input;
 }
 

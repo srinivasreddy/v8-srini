@@ -9,6 +9,7 @@
 
 #include "src/maglev/maglev-known-node-aspects.h"
 #include "src/maglev/maglev-reducer.h"
+#include "src/maglev/maglev-type-confusion-tracing.h"
 
 namespace v8 {
 namespace internal {
@@ -62,10 +63,18 @@ class MapInference {
   ReduceResult InsertMapChecks(Zone* zone) {
     if (variant_ == kOnlyFresh) {
       DCHECK(all_maps_are_fresh());
+      TRACE_TC("map", "kOnlyFresh: trusting tracked maps for "
+                          << PrintNodeLabel(object_)
+                          << " WITHOUT emitting runtime map checks");
       return ReduceResult::Done();
     }
     if (!node_info_) return ReduceResult::Done();
-    if (!node_info_->maps_are_stale()) return ReduceResult::Done();
+    if (!node_info_->maps_are_stale()) {
+      TRACE_TC("map", "maps fresh/reliable for "
+                          << PrintNodeLabel(object_)
+                          << "; no runtime map checks emitted");
+      return ReduceResult::Done();
+    }
 
     // maps_are_stale implies the presence of unstable maps.
     DCHECK(node_info_->any_map_is_unstable());
@@ -75,6 +84,9 @@ class MapInference {
     if (!maps.is_empty()) {
       TRACE(TraceColor::kInfo << "  * MapInference emitting map checks for "
                               << PrintNodeLabel(object_));
+      TRACE_TC("map", "emitting runtime map checks for "
+                          << PrintNodeLabel(object_) << " against "
+                          << maps.size() << " stale unstable map(s)");
 
       // `maps` uses linear storage, but unfortunately we cannot exploit that
       // easily for BuildCheckMaps since it stores ObjectData underneath, which

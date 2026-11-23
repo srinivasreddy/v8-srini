@@ -16,6 +16,7 @@
 #include "src/maglev/maglev-graph-printer.h"
 #include "src/maglev/maglev-ir-inl.h"
 #include "src/maglev/maglev-tracer.h"
+#include "src/maglev/maglev-type-confusion-tracing.h"
 #include "src/objects/objects-inl.h"
 #include "src/roots/roots-inl.h"
 #include "src/zone/zone-containers.h"
@@ -577,6 +578,9 @@ void KnownNodeAspects::ClearUnstableNodeAspectsForStoreMap(
     StoreMap* node, bool is_tracing_enabled) {
   if (!node->is_transitioning()) return;
 
+  TRACE_TC("map", "transitioning StoreMap on "
+                      << PrintNodeLabel(node->ValueInput().node())
+                      << " invalidates tracked maps");
   if (MarkSingleMapAsStale(node->ValueInput().node(), is_tracing_enabled)) {
     return;
   }
@@ -591,6 +595,8 @@ void KnownNodeAspects::ClearUnstableNodeAspectsForStoreMap(
 
 void KnownNodeAspects::ClearUnstableNodeAspectsForMigration(
     ValueNode* object, bool is_tracing_enabled) {
+  TRACE_TC("map", "map migration on " << PrintNodeLabel(object)
+                                      << " invalidates tracked maps");
   if (MarkSingleMapAsStale(object, is_tracing_enabled)) {
     return;
   }
@@ -615,6 +621,9 @@ void KnownNodeAspects::ClearUnstableNodeAspectsForElementsTransition(
     }
     return false;
   };
+  TRACE_TC("elements", "elements-kind transition with "
+                           << transition_sources.size()
+                           << " source map(s) invalidates aliased maps/stores");
   if (MarkMapsStaleIfAny(MaybeAliases)) {
     if (V8_UNLIKELY(v8_flags.trace_maglev_kna && is_tracing_enabled)) {
       std::cout << kRed
@@ -934,6 +943,9 @@ bool KnownNodeAspects::MarkSingleMapAsStale(ValueNode* node,
     if (node_info->possible_maps_are_known() && !node_info->maps_are_stale() &&
         node_info->possible_maps().size() == 1) {
       compiler::MapRef old_map = node_info->possible_maps().at(0);
+      TRACE_TC("map", "single tracked map "
+                          << Brief(*old_map.object()) << " on "
+                          << PrintNodeLabel(node) << " marked stale");
       auto MaybeAliases = [&](compiler::MapRef map) -> bool {
         return map.equals(old_map);
       };

@@ -24,6 +24,7 @@
 #include "src/maglev/maglev-ir-inl.h"
 #include "src/maglev/maglev-map-inference.h"
 #include "src/maglev/maglev-node-type.h"
+#include "src/maglev/maglev-type-confusion-tracing.h"
 #include "src/numbers/conversions.h"
 #include "src/numbers/ieee754.h"
 #include "src/objects/heap-number-inl.h"
@@ -2411,6 +2412,8 @@ ReduceResult MaglevReducer<BaseT>::BuildCheckMaps(
     bool migration_done_outside) {
   KnownMapsMerger<base::Vector<const compiler::MapRef>> merger(broker(), zone(),
                                                                maps);
+  TRACE_TC("map", "BuildCheckMaps for " << PrintNodeLabel(object) << " against "
+                                        << maps.size() << " requested map(s)");
   RETURN_IF_DONE(TryFoldCheckMaps(object, nullptr, maps, merger));
 
   NodeInfo* known_info = GetOrCreateInfoFor(object);
@@ -2420,16 +2423,26 @@ ReduceResult MaglevReducer<BaseT>::BuildCheckMaps(
 
   // Emit checks.
   if (merger.emit_check_with_migration() && !migration_done_outside) {
+    TRACE_TC("map", "emit CheckMapsWithMigration for "
+                        << PrintNodeLabel(object)
+                        << " type=" << known_info->type());
     RETURN_IF_ABORT(AddNewNode<CheckMapsWithMigration>(
         {object}, merger.intersect_set(), GetCheckType(known_info->type())));
   } else if (has_deprecated_map_without_migration_target &&
              !migration_done_outside) {
+    TRACE_TC("map", "emit CheckMapsWithMigrationAndDeopt for "
+                        << PrintNodeLabel(object)
+                        << " type=" << known_info->type());
     RETURN_IF_ABORT(AddNewNode<CheckMapsWithMigrationAndDeopt>(
         {object}, merger.intersect_set(), GetCheckType(known_info->type())));
   } else if (map) {
+    TRACE_TC("map", "emit CheckMapsWithAlreadyLoadedMap for "
+                        << PrintNodeLabel(object));
     RETURN_IF_ABORT(AddNewNode<CheckMapsWithAlreadyLoadedMap>(
         {object, *map}, merger.intersect_set()));
   } else {
+    TRACE_TC("map", "emit CheckMaps for " << PrintNodeLabel(object)
+                                          << " type=" << known_info->type());
     RETURN_IF_ABORT(AddNewNode<CheckMaps>({object}, merger.intersect_set(),
                                           GetCheckType(known_info->type())));
   }
@@ -2437,6 +2450,9 @@ ReduceResult MaglevReducer<BaseT>::BuildCheckMaps(
   if (!merger.UpdateKnownNodeAspects(object, known_node_aspects())) {
     // If the type is empty, it means that the Check inserted above will deopt.
     // From here on, the code is dead.
+    TRACE_TC("map", "map intersection empty for "
+                        << PrintNodeLabel(object)
+                        << "; CheckMaps will deopt, code is dead");
     return BuildAbort(AbortReason::kUnreachable);
   }
   return ReduceResult::Done();
@@ -2659,6 +2675,10 @@ MaybeReduceResult MaglevReducer<BaseT>::TryFoldCheckMaps(
     // TODO(olivf) Try to combine node_info and possible maps and ensure that
     // narrowing the type also clears impossible possible_maps.
     NodeInfo* known_info = GetOrCreateInfoFor(object);
+    TRACE_TC("map", "ELIDING map check for "
+                        << PrintNodeLabel(object)
+                        << ": known maps already a subset of requested maps "
+                           "(no runtime CheckMaps emitted)");
     if (!NodeTypeIs(known_info->type(), merger.node_type())) {
       known_info->UnionType(merger.node_type());
     }

@@ -21,6 +21,7 @@
 #include "src/maglev/maglev-node-type.h"
 #include "src/maglev/maglev-reducer-inl.h"
 #include "src/maglev/maglev-reducer.h"
+#include "src/maglev/maglev-type-confusion-tracing.h"
 #include "src/numbers/conversions.h"
 
 namespace v8 {
@@ -34,6 +35,30 @@ namespace maglev {
       StdoutStream{} << __VA_ARGS__ << std::endl;          \
     }                                                      \
   } while (false)
+
+// Readable name for a ValueRepresentation, used by the type-confusion trace
+// (ValueRepresentation has no ostream operator of its own).
+static const char* TypeConfusionReprName(ValueRepresentation repr) {
+  switch (repr) {
+    case ValueRepresentation::kTagged:
+      return "Tagged";
+    case ValueRepresentation::kInt32:
+      return "Int32";
+    case ValueRepresentation::kUint32:
+      return "Uint32";
+    case ValueRepresentation::kFloat64:
+      return "Float64";
+    case ValueRepresentation::kHoleyFloat64:
+      return "HoleyFloat64";
+    case ValueRepresentation::kIntPtr:
+      return "IntPtr";
+    case ValueRepresentation::kRawPtr:
+      return "RawPtr";
+    case ValueRepresentation::kNone:
+      return "None";
+  }
+  return "?";
+}
 
 std::ostream& operator<<(std::ostream& os,
                          MaglevPhiRepresentationSelector::UntaggingKind kind) {
@@ -1028,6 +1053,11 @@ void MaglevPhiRepresentationSelector::ConvertTaggedPhiTo(
   DCHECK(repr == ValueRepresentation::kInt32 ||
          repr == ValueRepresentation::kFloat64 ||
          repr == ValueRepresentation::kHoleyFloat64);
+  TRACE_TC("repr", "untagging phi " << PrintNodeLabel(phi) << " from Tagged to "
+                                    << TypeConfusionReprName(repr)
+                                    << (truncating ? " (truncating)" : "")
+                                    << " across " << phi->input_count()
+                                    << " input(s)");
   phi->change_representation(repr);
 
   for (int input_index = 0; input_index < phi->input_count(); input_index++) {

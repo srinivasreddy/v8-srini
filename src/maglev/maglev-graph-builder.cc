@@ -60,6 +60,7 @@
 #include "src/maglev/maglev-node-type.h"
 #include "src/maglev/maglev-reducer-inl.h"
 #include "src/maglev/maglev-reducer.h"
+#include "src/maglev/maglev-type-confusion-tracing.h"
 #include "src/numbers/conversions.h"
 #include "src/numbers/ieee754.h"
 #include "src/objects/arguments.h"
@@ -5135,6 +5136,11 @@ MaybeReduceResult MaglevGraphBuilder::TryBuildElementAccessOnTypedArray(
   DCHECK(HasOnlyJSTypedArrayMaps(
       base::VectorOf(access_info.lookup_start_object_maps())));
   ElementsKind elements_kind = access_info.elements_kind();
+  TRACE_TC("elements", "typed-array element access on "
+                           << PrintNodeLabel(object) << " assuming kind "
+                           << elements_kind << " ("
+                           << access_info.lookup_start_object_maps().size()
+                           << " map(s))");
   if ((elements_kind == FLOAT16_ELEMENTS && !reducer_.CanInlineFloat16()) ||
       elements_kind == BIGUINT64_ELEMENTS ||
       elements_kind == BIGINT64_ELEMENTS) {
@@ -5548,6 +5554,11 @@ MaybeReduceResult MaglevGraphBuilder::TryBuildElementAccessOnJSArrayOrJSObject(
   if (!IsFastElementsKind(access_info.elements_kind())) {
     return {};
   }
+  TRACE_TC("elements", "JSArray/JSObject element access on "
+                           << PrintNodeLabel(object) << " assuming fast kind "
+                           << access_info.elements_kind() << " ("
+                           << access_info.lookup_start_object_maps().size()
+                           << " map(s))");
   switch (keyed_mode.access_mode()) {
     case compiler::AccessMode::kLoad:
       return BuildElementLoadOnJSArrayOrJSObject(
