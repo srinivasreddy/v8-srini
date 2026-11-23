@@ -3245,8 +3245,25 @@ MaybeReduceResult MaglevReducer<BaseT>::TryReduceObjectIs(
 
 template <typename BaseT>
 ReduceResult MaglevReducer<BaseT>::BuildCheckSmi(ValueNode* object) {
-  if (object->StaticTypeIs(broker(), NodeType::kSmi)) return object;
-  RETURN_IF_DONE(EnsureType(object, NodeType::kSmi, DeoptimizeReason::kSmi));
+  if (object->StaticTypeIs(broker(), NodeType::kSmi)) {
+    TRACE_TC("smi", "ELIDING Smi check for "
+                        << PrintNodeLabel(object)
+                        << ": static type already Smi (no runtime CheckSmi "
+                           "emitted)");
+    return object;
+  }
+  {
+    MaybeReduceResult ensured =
+        EnsureType(object, NodeType::kSmi, DeoptimizeReason::kSmi);
+    if (ensured.IsDoneWithValue()) {
+      TRACE_TC("smi", "ELIDING Smi check for "
+                          << PrintNodeLabel(object)
+                          << ": known-node-aspects already Smi (no runtime "
+                             "CheckSmi emitted)");
+      return ensured.Checked();
+    }
+    RETURN_IF_DONE(ensured);
+  }
 
   // Untagged constants in Smi range don't need runtime checks.
   switch (object->opcode()) {

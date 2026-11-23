@@ -11406,7 +11406,18 @@ ReduceResult MaglevGraphBuilder::BuildConvertHoleToUndefined(ValueNode* node) {
 }
 
 ReduceResult MaglevGraphBuilder::BuildCheckNotHole(ValueNode* node) {
-  RETURN_IF_DONE(reducer_.TryFoldCheckNotHole(node));
+  {
+    MaybeReduceResult folded = reducer_.TryFoldCheckNotHole(node);
+    if (folded.IsDone()) {
+      if (node->is_tagged() && folded.IsDoneWithoutAbort()) {
+        TRACE_TC("hole", "ELIDING hole check for "
+                             << PrintNodeLabel(node)
+                             << ": believed not-the-hole (no runtime "
+                                "CheckNotHole emitted)");
+      }
+      return folded.Checked();
+    }
+  }
   return AddNewNode<CheckNotHole>({node});
 }
 
