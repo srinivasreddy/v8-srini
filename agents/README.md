@@ -18,6 +18,12 @@ in
 
 Reusable workflows, commands, and conventions live in `skills/` and `rules/`.
 
+Notable rules:
+
+- [`rules/pristine-baseline-build.md`](rules/pristine-baseline-build.md) — when
+  building an instrumented or traced V8, also build a pristine V8 on the latest
+  dev branch as a differential baseline.
+
 To install them for your agent environment, run the appropriate installation
 script from the `agents/` directory:
 
